@@ -1,0 +1,20 @@
+# Normalize line endings so contributors on Windows, macOS, and Linux don't
+# produce whole-file diffs against each other. Text is stored LF in the repo
+# and checked out native; the files below are forced LF because they're read
+# by tools that break on CRLF (shell, Docker) or are compared byte-for-byte.
+* text=auto
+
+*.go      text eol=lf
+*.sql     text eol=lf
+*.sh      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.md      text eol=lf
+*.json    text eol=lf
+go.mod    text eol=lf
+go.sum    text eol=lf
+Dockerfile text eol=lf
+
+*.png     binary
+*.jpg     binary
+*.webp    binary

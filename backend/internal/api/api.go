@@ -1,0 +1,171 @@
+package api
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/conditional"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Cawlumm/open-exercise-db/internal/export"
+	"github.com/Cawlumm/open-exercise-db/internal/store"
+)
+
+// cacheControl is applied to every GET response (docs/DESIGN.md ->
+// Performance: "Cache-Control/ETag on every GET"). This dataset changes
+// rarely and there's no cache-purge mechanism in Phase 1 (that arrives with
+// /export's R2 write-through in Phase 2), so a moderate max-age plus a long
+// stale-while-revalidate window is what actually saves origin hits: repeat
+// reads from many independent consumers land on the Cloudflare edge cache,
+// not this process, without risking a stale response outliving a real edit
+// for more than a few minutes.
+const cacheControl = "public, max-age=300, stale-while-revalidate=86400"
+
+// Register wires every Phase 1 read operation (docs/PHASE1_BUILD_PLAN.md
+// WO-3 and WO-5) onto api against the given stores. exportCache is
+// constructed and owned by cmd/api-server/main.go, matching
+// docs/CONVENTIONS.md section 2's DI pattern (constructors wired in main,
+// passed in — the same shape as a hypothetical media.Store parameter).
+// Called once from main; main itself stays thin.
+func Register(hapi huma.API, s *store.Store, exportCache *export.Cache) {
+	registerExerciseRoutes(hapi, s)
+	registerMetaRoutes(hapi, s)
+	registerExportRoutes(hapi, s, exportCache)
+}
+
+// mapStoreError translates a store-layer error into a typed huma error, per
+// docs/CONVENTIONS.md section 4/5: the store stays HTTP-unaware and returns
+// pgx.ErrNoRows upward; the API layer is what knows that means 404. Any
+// other error is logged server-side with full detail and replaced with an
+// opaque 500 — raw DB errors never reach a client.
+func mapStoreError(err error, notFoundMsg string) error {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return huma.Error404NotFound(notFoundMsg)
+	}
+	log.Printf("store error: %v", err)
+	return huma.Error500InternalServerError("internal error")
+}
+
+// etagValue computes a strong-comparison-capable content hash from body's
+// JSON encoding, in the *bare* (unquoted) form conditional.PreconditionFailed
+// expects as the "current" resource tag — it compares against this directly,
+// while stripping quotes/W- prefixes only from the *incoming* header values
+// (see huma's conditional/params.go trimETag). etagHeader below adds the
+// quoting RFC 9110 §8.8.3 requires for the value actually sent on the wire.
+//
+// Double marshal, explicitly not optimized away: huma will marshal the same
+// Body value again itself once this handler returns a non-error output —
+// there's no per-operation hook to compute a tag from bytes huma has already
+// produced. Two real hooks do exist for an output's Body field (verified
+// against huma v2.39.1's source, huma.go ~line 1282): a `[]byte` field is
+// written raw via ctx.BodyWriter() instead of being run through
+// api.Transform/Marshal, and a `func(Context)` field hands the handler full
+// control. Both were rejected here: `[]byte` falls into schema.go's generic
+// byte-slice case (confirmed at schema.go:861-864) and gets documented in
+// the OpenAPI spec as an opaque base64 string instead of the real object
+// shape — unacceptable for these typed, per-item/per-page responses, where
+// an accurate generated schema is the whole point of huma. `func(Context)`
+// forfeits huma's status/content-negotiation handling for a bigger rewrite
+// than this defect warrants. For WO-3's payload sizes (one exercise, a page
+// of <=100, or a short taxonomy list) the second marshal costs
+// microseconds, so it's left in place rather than traded for either of
+// those. WO-5's /export is the case where this tradeoff should be revisited
+// — but the fix there isn't this hook, it's that docs/PHASE1_BUILD_PLAN.md
+// already specs /export as built once and cached in memory, so its JSON
+// only gets marshaled once *ever*, not once per request; per-request
+// double-marshal stops being the right frame entirely once that cache
+// exists.
+func etagValue(body any) string {
+	b, err := json.Marshal(body)
+	if err != nil {
+		// body is always one of this package's own response structs, so a
+		// marshal failure here would mean a genuinely broken type — not a
+		// runtime condition worth surfacing to the client as an error, since
+		// the same struct is about to be marshaled again by huma itself.
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:16])
+}
+
+// etagHeader quotes tag for the wire, per RFC 9110 §8.8.3's entity-tag
+// grammar.
+func etagHeader(tag string) string {
+	return `"` + tag + `"`
+}
+
+// checkNotModified implements RFC 9110 §13.1.2 conditional-GET
+// short-circuiting for every handler in this package: p is the request's
+// parsed conditional headers (every Input struct embeds conditional.Params,
+// which huma auto-populates from If-Match/If-None-Match/If-Modified-Since/
+// If-Unmodified-Since and auto-resolves before the handler runs), and tag is
+// the bare ETag just computed for the response body that's about to be
+// returned. On a match it returns a 304 error carrying the same
+// Cache-Control/ETag headers a 200 would have had — RFC 9110 §15.4.5
+// requires a 304 to still report the resource's current metadata, since
+// that's how the client learns what to send on its *next* revalidation.
+//
+// cc is the Cache-Control value to echo on that 304 — parameterized (rather
+// than reading the package-level cacheControl constant directly) because
+// WO-5's /exercises/export uses a deliberately longer value than every other
+// GET in this package (see exportCacheControl in export.go); every other
+// caller here still just passes cacheControl.
+//
+// The actual comparison — weak per RFC 9110 §8.8.3.2 (right for this case:
+// these are read-only GETs comparing full-body hashes, not byte-for-byte
+// write preconditions), If-None-Match's comma-separated list, and the `*`
+// wildcard — is delegated entirely to huma's own conditional package rather
+// than hand-rolled, so it can't drift from what huma itself documents in the
+// generated spec for these header params.
+func checkNotModified(p *conditional.Params, tag, cc string) error {
+	// Workaround for a huma v2.39.1 bug, not a fix to our own logic: RFC 9110
+	// §5.6.1's list-header grammar is `#element = [element] *( OWS ","
+	// OWS [element] )` — optional whitespace (OWS) is explicitly legal
+	// around each comma. huma splits If-Match/If-None-Match on "," (huma.go's
+	// parseInto, non-Explode reflect.Slice case) but never strips that OWS
+	// back off, so any list element after the first that has a leading space
+	// (e.g. `If-None-Match: "a", "b"`, which every RFC-conformant sender is
+	// entitled to produce, and which a CDN in front of this API — see
+	// docs/DESIGN.md's Performance section — is a realistic source of) still
+	// carries that space when it reaches conditional.trimETag
+	// (conditional/params.go:28). trimETag only strips a `W/` prefix and `"`
+	// characters via strings.Trim, which stops at the very first character
+	// that isn't in the cutset — a leading space — so the entry never gets
+	// unquoted and can never equal a bare tag. Trimming OWS from each element
+	// here, before PreconditionFailed's own comparison runs, fixes it without
+	// forking or reimplementing that comparison logic. Full report filed at
+	// docs/huma-if-none-match-ows-bug.md; delete this block the moment huma
+	// fixes it upstream.
+	p.IfMatch = trimListOWS(p.IfMatch)
+	p.IfNoneMatch = trimListOWS(p.IfNoneMatch)
+
+	err := p.PreconditionFailed(tag, time.Time{})
+	if err == nil {
+		return nil
+	}
+	return huma.ErrorWithHeaders(err, http.Header{
+		"Cache-Control": {cc},
+		"ETag":          {etagHeader(tag)},
+	})
+}
+
+// trimListOWS strips RFC 9110 optional whitespace (spaces and tabs) from
+// each element of an already comma-split list header value. See
+// checkNotModified's comment for why this exists.
+func trimListOWS(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	trimmed := make([]string, len(values))
+	for i, v := range values {
+		trimmed[i] = strings.Trim(v, " \t")
+	}
+	return trimmed
+}

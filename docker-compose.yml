@@ -1,0 +1,37 @@
+# Local dev stack: Postgres + the Go API. Production targets Neon (managed
+# Postgres) + Google Cloud Run instead — see docs/DESIGN.md's Hosting section.
+# This compose file also doubles as the self-host scale-up path described
+# there (e.g. on an Oracle Always Free VM) if this project ever outgrows the
+# free managed tiers.
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-openexercisedb}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-openexercisedb}
+      - POSTGRES_DB=${POSTGRES_DB:-openexercisedb}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-openexercisedb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      - ENV=development
+      - PORT=8080
+      - DATABASE_URL=postgres://${POSTGRES_USER:-openexercisedb}:${POSTGRES_PASSWORD:-openexercisedb}@postgres:5432/${POSTGRES_DB:-openexercisedb}?sslmode=disable
+      - JWT_SECRET=${JWT_SECRET}
+      - ADMIN_GITHUB_LOGINS=${ADMIN_GITHUB_LOGINS}
+    ports:
+      - "${PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy

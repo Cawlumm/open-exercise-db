@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 48" width="300" height="48">
+  <!-- Concept C: plate framed by code brackets — open data + API-first -->
+  <g transform="translate(4, 4)">
+    <path d="M12 6 Q4 6 4 14 L4 26 Q4 34 12 34" fill="none" stroke="#d97706"
+          stroke-width="3" stroke-linecap="round"></path>
+    <path d="M28 6 Q36 6 36 14 L36 26 Q36 34 28 34" fill="none" stroke="#d97706"
+          stroke-width="3" stroke-linecap="round"></path>
+    <circle cx="20" cy="20" r="8" fill="none" stroke="#0f172a" stroke-width="3"></circle>
+    <circle cx="20" cy="20" r="2.2" fill="#0f172a"></circle>
+  </g>
+  <text x="50" y="31" font-family="'Outfit', 'Plus Jakarta Sans', sans-serif" font-weight="700"
+        font-size="21" letter-spacing="-0.6" fill="#0f172a">open<tspan fill="#d97706">-exercise-</tspan>db</text>
+</svg>

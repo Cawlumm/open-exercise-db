@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Go build & test
+    runs-on: ubuntu-latest
+    # Postgres version matches docker-compose.yml so local and CI agree
+    # (docs/PHASE1_BUILD_PLAN.md WO-6). requirePostgres (duplicated per
+    # docs/CONVENTIONS.md section 6 across internal/{api,database,export,
+    # seed,store}) skips instead of failing when no Postgres is reachable, so
+    # a contributor without Docker still gets a useful `go test`. Left alone,
+    # that same skip is what made the previous no-DB CI report green without
+    # exercising any real query — the OEDB_REQUIRE_POSTGRES env var below
+    # closes that: it flips every skip in this job into a t.Fatalf.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          # Matches .env.example / docker-compose.yml's local defaults so the
+          # tests' baseDSN() fallback works unchanged in CI too.
+          POSTGRES_USER: openexercisedb
+          POSTGRES_PASSWORD: openexercisedb
+          POSTGRES_DB: openexercisedb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U openexercisedb"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # The disposable-database pattern (internal/database/database_test.go
+      # newTestDatabase, duplicated per-package per docs/CONVENTIONS.md
+      # section 6) issues CREATE DATABASE / DROP DATABASE against this DSN's
+      # role. The official postgres image grants POSTGRES_USER superuser at
+      # initdb time (it's the bootstrap role), which carries CREATEDB
+      # implicitly, so this needs no extra grants beyond what the image does
+      # by default — verified locally: the same image/credentials via
+      # docker-compose.yml let `go test ./...` create and drop scratch
+      # databases with zero extra setup.
+      DATABASE_URL: postgres://openexercisedb:openexercisedb@localhost:5432/openexercisedb?sslmode=disable
+      # Without this, requirePostgres's t.Skipf (internal/{api,database,
+      # export,seed,store}) turns "Postgres unreachable" into a quiet pass
+      # instead of a red build — proven locally: `go test ./internal/store/
+      # ./internal/database/` against a bad DATABASE_URL reports `ok` in
+      # ~2.7s having run nothing. That's the exact failure mode a broken or
+      # slow-starting service container would hit. Setting this makes the
+      # same condition a t.Fatalf in CI, so the suite can't pass by doing
+      # nothing; see docs/CONVENTIONS.md section 6.
+      OEDB_REQUIRE_POSTGRES: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - run: cd backend && go build ./...
+      - run: cd backend && go vet ./...
+      # -timeout bounds a single `go test` invocation, not the job; the full
+      # suite runs in ~5 minutes against real Postgres, so 30s (the previous
+      # value, sized for a no-DB run that only ever hit t.Skip) would kill a
+      # legitimate run. 15m leaves headroom without masking a genuine hang.
+      - run: cd backend && go test ./... -count=1 -timeout 15m
+
+  docker-build:
+    name: Build backend image
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: false

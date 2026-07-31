@@ -1,0 +1,48 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+
+# Build artifacts
+dist/
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+open-exercise-db-api
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+coverage/
+*.test
+
+# Logs
+logs/
+*.log
+
+# Local Postgres data (docker-compose dev volume)
+data/
+*.db
+
+# OS
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Local Claude context
+CLAUDE.md
+.claude/
