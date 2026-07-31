@@ -30,6 +30,18 @@ services:
       - DATABASE_URL=postgres://${POSTGRES_USER:-openexercisedb}:${POSTGRES_PASSWORD:-openexercisedb}@postgres:5432/${POSTGRES_DB:-openexercisedb}?sslmode=disable
       - JWT_SECRET=${JWT_SECRET}
       - ADMIN_GITHUB_LOGINS=${ADMIN_GITHUB_LOGINS}
+      # Rate limiting (docs/API_POLICY.md) — all optional; an empty value
+      # falls back to the defaults in backend/internal/config/config.go.
+      # Passed through so a self-hoster can tune them via .env without
+      # editing this file.
+      - OEDB_RATELIMIT_READ_RPM=${OEDB_RATELIMIT_READ_RPM:-}
+      - OEDB_RATELIMIT_READ_BURST=${OEDB_RATELIMIT_READ_BURST:-}
+      - OEDB_RATELIMIT_SEARCH_RPM=${OEDB_RATELIMIT_SEARCH_RPM:-}
+      - OEDB_RATELIMIT_SEARCH_BURST=${OEDB_RATELIMIT_SEARCH_BURST:-}
+      - OEDB_RATELIMIT_EXPORT_RPM=${OEDB_RATELIMIT_EXPORT_RPM:-}
+      - OEDB_RATELIMIT_EXPORT_BURST=${OEDB_RATELIMIT_EXPORT_BURST:-}
+      - OEDB_RATELIMIT_UNIDENTIFIED_RPM=${OEDB_RATELIMIT_UNIDENTIFIED_RPM:-}
+      - OEDB_RATELIMIT_UNIDENTIFIED_BURST=${OEDB_RATELIMIT_UNIDENTIFIED_BURST:-}
     ports:
       - "${PORT:-8080}:8080"
     depends_on:

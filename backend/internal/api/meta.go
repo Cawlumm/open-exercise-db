@@ -8,6 +8,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/conditional"
 
 	"github.com/Cawlumm/open-exercise-db/internal/model"
+	"github.com/Cawlumm/open-exercise-db/internal/ratelimit"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
 )
 
@@ -72,6 +73,8 @@ func registerMetaRoutes(hapi huma.API, s *store.Store) {
 		Path:        "/api/v1/meta/muscle-groups",
 		Summary:     "List muscle group taxonomy terms",
 		Tags:        []string{"meta"},
+		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierRead},
+		Errors:      []int{http.StatusTooManyRequests},
 	}, func(ctx context.Context, input *ListTaxonomyTermsInput) (*ListTaxonomyTermsOutput, error) {
 		return ListTaxonomyTerms(ctx, s, facetMuscleGroup, input)
 	})
@@ -82,6 +85,8 @@ func registerMetaRoutes(hapi huma.API, s *store.Store) {
 		Path:        "/api/v1/meta/equipment",
 		Summary:     "List equipment taxonomy terms",
 		Tags:        []string{"meta"},
+		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierRead},
+		Errors:      []int{http.StatusTooManyRequests},
 	}, func(ctx context.Context, input *ListTaxonomyTermsInput) (*ListTaxonomyTermsOutput, error) {
 		return ListTaxonomyTerms(ctx, s, facetEquipment, input)
 	})
@@ -92,6 +97,8 @@ func registerMetaRoutes(hapi huma.API, s *store.Store) {
 		Path:        "/api/v1/meta/categories",
 		Summary:     "List category taxonomy terms",
 		Tags:        []string{"meta"},
+		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierRead},
+		Errors:      []int{http.StatusTooManyRequests},
 	}, func(ctx context.Context, input *ListTaxonomyTermsInput) (*ListTaxonomyTermsOutput, error) {
 		return ListTaxonomyTerms(ctx, s, facetCategory, input)
 	})
@@ -102,6 +109,8 @@ func registerMetaRoutes(hapi huma.API, s *store.Store) {
 		Path:        "/api/v1/meta/locales",
 		Summary:     "List locales with translated content",
 		Tags:        []string{"meta"},
+		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierRead},
+		Errors:      []int{http.StatusTooManyRequests},
 	}, func(ctx context.Context, input *ListLocalesInput) (*ListLocalesOutput, error) {
 		return ListLocales(ctx, s, input)
 	})

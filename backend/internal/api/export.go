@@ -9,6 +9,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/conditional"
 
 	"github.com/Cawlumm/open-exercise-db/internal/export"
+	"github.com/Cawlumm/open-exercise-db/internal/ratelimit"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
 )
 
@@ -48,6 +49,12 @@ func registerExportRoutes(hapi huma.API, s *store.Store, cache *export.Cache) {
 		Path:        "/api/v1/exercises/export",
 		Summary:     "Full-catalog bulk export for mirroring and offline-first consumers",
 		Tags:        []string{"exercises"},
+		// TierExport: the lowest-throughput tier of the three
+		// (docs/PHASE1_BUILD_PLAN.md WO-7) — this is the heaviest single
+		// request in the API and is meant to be mirrored on a schedule,
+		// not polled; see docs/API_POLICY.md.
+		Metadata: map[string]any{rateLimitTierKey: ratelimit.TierExport},
+		Errors:   []int{http.StatusTooManyRequests},
 	}, func(ctx context.Context, input *ExportExercisesInput) (*ExportExercisesOutput, error) {
 		return ExportExercises(ctx, s, cache, input)
 	})

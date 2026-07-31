@@ -11,6 +11,7 @@ import (
 
 	"github.com/Cawlumm/open-exercise-db/internal/contract"
 	"github.com/Cawlumm/open-exercise-db/internal/model"
+	"github.com/Cawlumm/open-exercise-db/internal/ratelimit"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
 )
 
@@ -151,6 +152,12 @@ func registerExerciseRoutes(hapi huma.API, s *store.Store) {
 		Path:        "/api/v1/exercises",
 		Summary:     "List and filter exercises",
 		Tags:        []string{"exercises"},
+		// TierSearch, not TierRead: this is the endpoint a debounced
+		// type-ahead client hits repeatedly (docs/PHASE1_BUILD_PLAN.md
+		// WO-7), and it's a filtered/paginated query rather than a single
+		// cached row.
+		Metadata: map[string]any{rateLimitTierKey: ratelimit.TierSearch},
+		Errors:   []int{http.StatusTooManyRequests},
 	}, func(ctx context.Context, input *ListExercisesInput) (*ListExercisesOutput, error) {
 		return ListExercises(ctx, s, input)
 	})
@@ -161,7 +168,8 @@ func registerExerciseRoutes(hapi huma.API, s *store.Store) {
 		Path:        "/api/v1/exercises/{id}",
 		Summary:     "Get a single exercise",
 		Tags:        []string{"exercises"},
-		Errors:      []int{http.StatusNotFound},
+		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierRead},
+		Errors:      []int{http.StatusNotFound, http.StatusTooManyRequests},
 	}, func(ctx context.Context, input *GetExerciseInput) (*GetExerciseOutput, error) {
 		return GetExercise(ctx, s, input)
 	})
@@ -172,7 +180,8 @@ func registerExerciseRoutes(hapi huma.API, s *store.Store) {
 		Path:        "/api/v1/exercises/{id}/revisions",
 		Summary:     "List an exercise's revision history",
 		Tags:        []string{"exercises"},
-		Errors:      []int{http.StatusNotFound},
+		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierRead},
+		Errors:      []int{http.StatusNotFound, http.StatusTooManyRequests},
 	}, func(ctx context.Context, input *ListExerciseRevisionsInput) (*ListExerciseRevisionsOutput, error) {
 		return ListExerciseRevisions(ctx, s, input)
 	})
@@ -183,7 +192,8 @@ func registerExerciseRoutes(hapi huma.API, s *store.Store) {
 		Path:        "/api/v1/exercises/{id}/translations",
 		Summary:     "List an exercise's available translations",
 		Tags:        []string{"exercises"},
-		Errors:      []int{http.StatusNotFound},
+		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierRead},
+		Errors:      []int{http.StatusNotFound, http.StatusTooManyRequests},
 	}, func(ctx context.Context, input *ListExerciseTranslationsInput) (*ListExerciseTranslationsOutput, error) {
 		return ListExerciseTranslations(ctx, s, input)
 	})
