@@ -21,6 +21,7 @@ import (
 	"github.com/Cawlumm/open-exercise-db/internal/config"
 	"github.com/Cawlumm/open-exercise-db/internal/database"
 	"github.com/Cawlumm/open-exercise-db/internal/export"
+	"github.com/Cawlumm/open-exercise-db/internal/ratelimit"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
 )
 
@@ -52,6 +53,22 @@ func main() {
 	// submission-approval handler) has an obvious place to reach it from.
 	exportCache := export.NewCache(export.DefaultCacheTTL)
 
+	// limiter backs docs/PHASE1_BUILD_PLAN.md WO-7's origin rate-limit
+	// backstop (internal/ratelimit's package doc has the honest read on
+	// what this can and can't guarantee on autoscaled Cloud Run — the real,
+	// globally-accurate enforcement is the Cloudflare edge rules documented
+	// in docs/API_POLICY.md, not this process). Built from cfg.RateLimit so
+	// every tier's rate/burst is independently overridable per environment
+	// without a code change. Closed on shutdown to stop its cleanup
+	// goroutine cleanly, same spirit as pool.Close() above.
+	limiter := ratelimit.NewLimiter(ratelimit.Config{
+		Read:         ratelimit.Rule{RPM: cfg.RateLimit.ReadRPM, Burst: cfg.RateLimit.ReadBurst},
+		Search:       ratelimit.Rule{RPM: cfg.RateLimit.SearchRPM, Burst: cfg.RateLimit.SearchBurst},
+		Export:       ratelimit.Rule{RPM: cfg.RateLimit.ExportRPM, Burst: cfg.RateLimit.ExportBurst},
+		Unidentified: ratelimit.Rule{RPM: cfg.RateLimit.UnidentifiedRPM, Burst: cfg.RateLimit.UnidentifiedBurst},
+	})
+	defer limiter.Close()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -76,7 +93,7 @@ func main() {
 	humaConfig.Servers = []*huma.Server{{URL: "/", Description: "Same origin as the API"}}
 
 	hapi := humago.New(mux, humaConfig)
-	api.Register(hapi, stores, exportCache)
+	api.Register(hapi, stores, exportCache, limiter)
 
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,

@@ -1,6 +1,6 @@
 # Phase 1 build plan — data model + bootstrap + read API
 
-Execution plan for Phase 1 of `docs/DESIGN.md`, split into six work orders that can be
+Execution plan for Phase 1 of `docs/DESIGN.md`, split into seven work orders that can be
 picked up one at a time. Each has explicit scope, files, and acceptance criteria.
 
 **End state of Phase 1:** a publicly usable, self-documenting read API serving ~800
@@ -418,9 +418,17 @@ Two details worth copying deliberately:
   sharply limit generic/absent UAs. Document it prominently — a consumer that doesn't know
   the rule finds out by getting blocked.
 - **Standard rate-limit response**: `429` with `RateLimit-Limit` / `RateLimit-Remaining` /
-  `RateLimit-Reset` headers and `Retry-After` (RFC 9331 draft-standard naming), so clients
-  can back off correctly instead of guessing. Return a typed huma error so it lands in the
-  OpenAPI spec.
+  `RateLimit-Reset` headers and `Retry-After`, so clients can back off correctly instead of
+  guessing. Return a typed huma error so it lands in the OpenAPI spec.
+  **Correction (post-implementation):** this bullet originally cited "RFC 9331" for the
+  `RateLimit-*` header naming. That citation was wrong — RFC 9331 is *"The Explicit
+  Congestion Notification (ECN) Protocol for Low Latency, Low Loss, and Scalable Throughput
+  (L4S)"*, an unrelated transport-layer congestion-control spec. The actual source for this
+  header naming is the IETF **`draft-ietf-httpapi-ratelimit-headers`** Internet-Draft (not
+  yet an RFC as of implementation), specifically the three-header form (`RateLimit-Limit`/
+  `RateLimit-Remaining`/`RateLimit-Reset`) used by its earlier revisions and still the
+  form most widely deployed in practice (including by Open Food Facts). See
+  `docs/API_POLICY.md`'s "Standards note" for the full correction as published.
 - **Enforce at the edge where possible.** Cloudflare rate-limiting rules in front of the
   origin cost nothing on the free tier and absorb load before it reaches Cloud Run — the
   origin limiter is defense in depth, not the primary mechanism.
@@ -452,6 +460,56 @@ this scale, consistent with `DESIGN.md`'s "explicitly skipped" list.
 - Load test from WO-6/`DESIGN.md` re-run with limits enabled, confirming legitimate
   debounced-client traffic is unaffected.
 
+### WO-7 status: DONE
+
+Implemented and verified against real Postgres plus a live `./cmd/api-server` run (scripted
+burst, header inspection, `/docs` and `/api/v1/openapi.json` checks). Design outcomes and
+corrections later work orders (or a Phase 2 revisit of rate limiting) should inherit:
+
+- **The Cloudflare/origin split resolved as the design trap in this WO's own text predicted
+  it should**: Cloudflare's edge rules (`docs/API_POLICY.md` → "Cloudflare configuration")
+  are the real, globally-accurate enforcement; `internal/ratelimit`'s in-process
+  `golang.org/x/time/rate`-backed limiter is an explicitly-documented per-instance backstop,
+  not a second copy of the same guarantee. Its package doc comment states the N-instances-live
+  → N×-the-configured-limit consequence directly rather than letting it be discovered later.
+  No shared datastore (Redis, or a per-request Postgres check) was added — both `docs/DESIGN.md`
+  and this WO rule that out explicitly at this project's scale, and it was not revisited.
+- **Tiered by cost as specified**: `TierRead` (60 req/min, `/exercises/{id}` + `/meta/*`),
+  `TierSearch` (30 req/min, `/exercises`), `TierExport` (5 req/min, `/exercises/export`), plus
+  an orthogonal `Unidentified` tier (5 req/min) that replaces — not stacks with — an
+  endpoint's normal tier when the caller doesn't send a conformant `User-Agent`. All four are
+  independently configurable per environment via `internal/config.RateLimitConfig`
+  (`OEDB_RATELIMIT_*` env vars), satisfying "a test/staging instance must not be trivially
+  self-DoSed" without a code change.
+- **User-Agent strictness landed as "sharply limit, never hard-reject"**: a missing or
+  generic (library/browser-default) `User-Agent` routes to the `Unidentified` tier instead of
+  being rejected outright. `docs/API_POLICY.md` documents the full rationale, including the
+  browser-`fetch`-can't-set-`User-Agent` caveat (mirroring Open Food Facts' own guidance to
+  proxy through a backend).
+- **The RFC 9331 citation in this document's own original WO-7 text was wrong** — see the
+  correction inline above and `docs/API_POLICY.md`'s "Standards note" for the full writeup.
+  The `RateLimit-Limit`/`RateLimit-Remaining`/`RateLimit-Reset` header names implemented here
+  follow the IETF `draft-ietf-httpapi-ratelimit-headers` Internet-Draft (still a draft, not an
+  RFC, as of implementation), not RFC 9331.
+- **A real (if minor) routing defect surfaced by this WO's own tests, and was fixed**:
+  `internal/api.Register`'s registration order (exercise routes, including the `{id}`
+  wildcard, before the literal `/exercises/export` route) worked in production only because
+  `cmd/api-server`'s `humago`-over-`http.ServeMux` adapter resolves a literal path segment
+  over a wildcard at the same depth regardless of registration order (verified directly
+  against `net/http.ServeMux`). `humatest`'s simplified test router
+  (`adapters/humaflow/flow`) has no such rule — it matches in registration order — and this
+  WO's own `internal/api/ratelimit_test.go` is the first test in the package to register both
+  route groups together over real HTTP (every earlier `*_test.go` file registered
+  `registerExerciseRoutes`/`registerExportRoutes` separately, never on the same test API
+  instance, and so never hit this). Fixed by registering `registerExportRoutes` before
+  `registerExerciseRoutes` in `Register` — a no-op for production's router, and no longer
+  order-dependent for any router. See the comment on `Register` in `internal/api/api.go` for
+  the full explanation.
+- **`golang.org/x/time` (specifically its `rate` subpackage) is the one new dependency added**,
+  per this WO's own instruction to prefer it over hand-rolling a token bucket. Pure Go, no
+  cgo — preserves the `CGO_ENABLED=0` distroless build `docs/DESIGN.md`'s Cloud Run cold-start
+  numbers depend on, the same constraint `golang.org/x/image` (WO-4) was chosen under.
+
 ---
 
 ## Definition of done for Phase 1
@@ -461,6 +519,8 @@ this scale, consistent with `DESIGN.md`'s "explicitly skipped" list.
 - `/exercises/export` serves the canonical shape, key-for-key identical to `/exercises`.
 - Importer is idempotent; migrations are idempotent.
 - CI green with real-Postgres tests.
+- Every `GET` is rate-limited and `User-Agent`-gated per `docs/API_POLICY.md`; the origin
+  backstop and Cloudflare edge rules are both documented, honestly scoped, and testable.
 - **Not built yet, by design:** auth, submissions, moderation, media uploads via API, web UI.
 
 ## Open items to raise rather than guess

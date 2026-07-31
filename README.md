@@ -32,9 +32,11 @@ Full design rationale, data model, and phased build plan: **[`docs/DESIGN.md`](d
 
 ## Status
 
-Phase 1 (data model, read API, and the free-exercise-db bootstrap import) is implemented and
-runnable via the Quickstart below — no auth, no submissions, no web UI yet, and rate
-limiting/public-API hardening (WO-7) is still outstanding before this is announced anywhere.
+Phase 1 (data model, read API, the free-exercise-db bootstrap import, and public-API
+hardening) is implemented and runnable via the Quickstart below — no auth, no submissions, no
+web UI yet. Every `GET` endpoint is rate-limited and requires a `User-Agent`; see
+[`docs/API_POLICY.md`](docs/API_POLICY.md) for the published limits, the `User-Agent` format,
+debounce guidance for search, and how to request a higher limit.
 See [`docs/DESIGN.md`](docs/DESIGN.md) and [`docs/PHASE1_BUILD_PLAN.md`](docs/PHASE1_BUILD_PLAN.md)
 for the full phased build plan and current work-order status.
 
@@ -117,6 +119,11 @@ always current; the dump is right if you need offline operation or don't want a 
 dependency on this service. Key on `id` (a stable UUID), not `slug` or `name` — those can
 change when an exercise is edited upstream. Details in
 [`docs/DESIGN.md`](docs/DESIGN.md#consuming-this-api).
+
+**Every request needs a `User-Agent`** in the form `AppName/Version (ContactEmail)`, and every
+endpoint is rate-limited (tiered by cost — cheap cached reads get a generous budget, the full
+export gets the tightest one). See [`docs/API_POLICY.md`](docs/API_POLICY.md) for the exact
+numbers, debounce guidance for live search, and how to ask for a higher limit.
 
 See [`docs/DESIGN.md`](docs/DESIGN.md#api-rest-json-apiv1) for the complete endpoint list.
 

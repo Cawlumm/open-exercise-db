@@ -6,6 +6,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/humatest"
 
 	"github.com/Cawlumm/open-exercise-db/internal/export"
+	"github.com/Cawlumm/open-exercise-db/internal/ratelimit"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
 )
 
@@ -43,7 +44,9 @@ func TestRegister_DoesNotPanic(t *testing.T) {
 
 	s := store.New(nil)
 	cache := export.NewCache(export.DefaultCacheTTL)
+	limiter := ratelimit.NewLimiter(ratelimit.DefaultConfig())
+	t.Cleanup(limiter.Close)
 	_, hapi := humatest.New(t)
 
-	Register(hapi, s, cache)
+	Register(hapi, s, cache, limiter)
 }

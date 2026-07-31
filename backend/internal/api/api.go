@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Cawlumm/open-exercise-db/internal/export"
+	"github.com/Cawlumm/open-exercise-db/internal/ratelimit"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
 )
 
@@ -29,15 +30,44 @@ import (
 const cacheControl = "public, max-age=300, stale-while-revalidate=86400"
 
 // Register wires every Phase 1 read operation (docs/PHASE1_BUILD_PLAN.md
-// WO-3 and WO-5) onto api against the given stores. exportCache is
-// constructed and owned by cmd/api-server/main.go, matching
-// docs/CONVENTIONS.md section 2's DI pattern (constructors wired in main,
-// passed in — the same shape as a hypothetical media.Store parameter).
-// Called once from main; main itself stays thin.
-func Register(hapi huma.API, s *store.Store, exportCache *export.Cache) {
+// WO-3 and WO-5) onto api against the given stores. exportCache and
+// limiter are both constructed and owned by cmd/api-server/main.go,
+// matching docs/CONVENTIONS.md section 2's DI pattern (constructors wired
+// in main, passed in). Called once from main; main itself stays thin.
+//
+// limiter's middleware (internal/api/ratelimit.go) is installed via
+// hapi.UseMiddleware before any route is registered, so it runs ahead of
+// every operation below — docs/PHASE1_BUILD_PLAN.md WO-7's rate limiting
+// and User-Agent policy apply uniformly to every GET this package exposes,
+// not opted into per-route.
+func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter *ratelimit.Limiter) {
+	hapi.UseMiddleware(rateLimitMiddleware(hapi, limiter))
+
+	// registerExportRoutes intentionally comes before registerExerciseRoutes.
+	// GET /api/v1/exercises/export (a static, literal path) and GET
+	// /api/v1/exercises/{id} (a wildcard on the same path depth) would
+	// otherwise be ambiguous for a router that resolves conflicts by
+	// registration order — and one does: humatest's default adapter
+	// (adapters/humaflow/flow, used by internal/api/ratelimit_test.go's
+	// full-Register HTTP tests, the first tests in this package to
+	// exercise both route groups together over real HTTP — every earlier
+	// test called registerExerciseRoutes/registerExportRoutes separately
+	// on its own throwaway humatest.API and so never hit this) matches
+	// registered patterns in order, so registering {id} first made every
+	// request for literal "export" resolve to get-exercise with id="export"
+	// instead of export-exercises, a 422 (invalid UUID) instead of the
+	// export blob. Production (cmd/api-server/main.go's humago adapter over
+	// Go 1.22+'s stdlib http.ServeMux) doesn't have this failure mode —
+	// ServeMux resolves a literal segment over a wildcard at the same depth
+	// regardless of registration order, verified directly against
+	// http.ServeMux — but relying on that being true of every router this
+	// project might ever route through (including test doubles) is exactly
+	// the kind of order-dependency that's cheap to just not have. Register
+	// the more specific path first and neither router's resolution rule
+	// matters.
+	registerExportRoutes(hapi, s, exportCache)
 	registerExerciseRoutes(hapi, s)
 	registerMetaRoutes(hapi, s)
-	registerExportRoutes(hapi, s, exportCache)
 }
 
 // mapStoreError translates a store-layer error into a typed huma error, per
