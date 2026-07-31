@@ -111,8 +111,12 @@ func Load() Config {
 			ReadRPM:   getEnvFloat("OEDB_RATELIMIT_READ_RPM", 60),
 			ReadBurst: getEnvInt("OEDB_RATELIMIT_READ_BURST", 20),
 
-			SearchRPM:   getEnvFloat("OEDB_RATELIMIT_SEARCH_RPM", 30),
-			SearchBurst: getEnvInt("OEDB_RATELIMIT_SEARCH_BURST", 15),
+			// Matched to Read rather than set below it: docs/DESIGN.md makes
+			// live lookup the *primary* consumption model, which makes search
+			// the main endpoint for the integration path we recommend.
+			// Throttling it under plain reads would penalize exactly that.
+			SearchRPM:   getEnvFloat("OEDB_RATELIMIT_SEARCH_RPM", 60),
+			SearchBurst: getEnvInt("OEDB_RATELIMIT_SEARCH_BURST", 20),
 
 			ExportRPM:   getEnvFloat("OEDB_RATELIMIT_EXPORT_RPM", 5),
 			ExportBurst: getEnvInt("OEDB_RATELIMIT_EXPORT_BURST", 2),

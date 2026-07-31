@@ -170,9 +170,10 @@ func checkNotModified(p *conditional.Params, tag, cc string) error {
 	// that isn't in the cutset — a leading space — so the entry never gets
 	// unquoted and can never equal a bare tag. Trimming OWS from each element
 	// here, before PreconditionFailed's own comparison runs, fixes it without
-	// forking or reimplementing that comparison logic. Full report filed at
-	// docs/huma-if-none-match-ows-bug.md; delete this block the moment huma
-	// fixes it upstream.
+	// forking or reimplementing that comparison logic. Filed upstream as
+	// https://github.com/danielgtaylor/huma/issues/1084 (details in
+	// docs/huma-if-none-match-ows-bug.md); delete this block once we're on a
+	// huma release that includes the fix.
 	p.IfMatch = trimListOWS(p.IfMatch)
 	p.IfNoneMatch = trimListOWS(p.IfNoneMatch)
 

@@ -475,7 +475,7 @@ corrections later work orders (or a Phase 2 revisit of rate limiting) should inh
   No shared datastore (Redis, or a per-request Postgres check) was added — both `docs/DESIGN.md`
   and this WO rule that out explicitly at this project's scale, and it was not revisited.
 - **Tiered by cost as specified**: `TierRead` (60 req/min, `/exercises/{id}` + `/meta/*`),
-  `TierSearch` (30 req/min, `/exercises`), `TierExport` (5 req/min, `/exercises/export`), plus
+  `TierSearch` (60 req/min, `/exercises`), `TierExport` (5 req/min, `/exercises/export`), plus
   an orthogonal `Unidentified` tier (5 req/min) that replaces — not stacks with — an
   endpoint's normal tier when the caller doesn't send a conformant `User-Agent`. All four are
   independently configurable per environment via `internal/config.RateLimitConfig`
