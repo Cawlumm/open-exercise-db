@@ -21,7 +21,7 @@ to serve; the full-catalog export costs the most.
 | Tier | Applies to | Limit | Why |
 |---|---|---|---|
 | Read | `GET /exercises/{id}`, `GET /meta/*` | 60 req/min/IP | Cheap, cached, single-row/short-list reads |
-| Search | `GET /exercises` | 30 req/min/IP (burst up to 15) | Sized for a *debounced* type-ahead client, not a per-keystroke one — see [Debounce your search](#debounce-your-search-not-optional) |
+| Search | `GET /exercises` | 60 req/min/IP (burst up to 20) | Matched to Read rather than set below it — live lookup is the primary integration model, so search is *its* main endpoint. Still assumes a *debounced* client, not a per-keystroke one — see [Debounce your search](#debounce-your-search-not-optional) |
 | Export | `GET /exercises/export` | 5 req/min/IP | The heaviest single request in the API — see [Mirror the dump, don't poll it](#mirror-the-dump-dont-poll-it) |
 | Unidentified | Any request without a conformant `User-Agent` | 5 req/min/IP, replacing whatever tier the endpoint would otherwise use | See [User-Agent requirement](#user-agent-requirement) |
 
@@ -89,13 +89,15 @@ gives its own browser-based consumers.
 ## Debounce your search (not optional)
 
 `GET /exercises` is the endpoint a live type-ahead search hits, and it's easy to blow through
-30 req/min without meaning to: a single user typing one 10-character query at normal speed,
-firing a request per keystroke, is 10 requests in a couple of seconds on its own.
+60 req/min without meaning to: a single user typing one 10-character query at normal speed,
+firing a request per keystroke, is 10 requests in a couple of seconds on its own — and a
+handful of users behind one IP (see [Known limitation: shared IPs](#known-limitation-shared-ips))
+multiplies that.
 
 **Debounce 300-500ms before firing a search request**, or fetch a candidate set once per
 session/page-load and filter it client-side instead of re-querying on every keystroke. Either
-approach comfortably fits inside the Search tier's burst allowance (15 requests available
-immediately, refilling at 0.5/sec) for real usage patterns; a per-keystroke integration will
+approach comfortably fits inside the Search tier's burst allowance (20 requests available
+immediately, refilling at 1/sec) for real usage patterns; a per-keystroke integration will
 not.
 
 ## Mirror the dump, don't poll it
@@ -117,7 +119,7 @@ tier's limit.
 A request that exceeds its bucket gets `429 Too Many Requests` with:
 
 ```
-RateLimit-Limit: 30
+RateLimit-Limit: 60
 RateLimit-Remaining: 0
 RateLimit-Reset: 12
 Retry-After: 12
@@ -126,7 +128,7 @@ Content-Type: application/problem+json
 {
   "title": "Too Many Requests",
   "status": 429,
-  "detail": "rate limit exceeded for the search tier (30 req/min); see docs/API_POLICY.md for limits and how to request more"
+  "detail": "rate limit exceeded for the search tier (60 req/min); see docs/API_POLICY.md for limits and how to request more"
 }
 ```
 

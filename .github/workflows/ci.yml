@@ -62,6 +62,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
+          # The module lives in backend/, not the repo root, so setup-go's
+          # default go.sum lookup misses it and silently disables the module
+          # cache ("Restore cache failed: Dependencies file is not found").
+          # Without this, every run re-downloads the whole dependency tree.
+          cache-dependency-path: backend/go.sum
       - run: cd backend && go build ./...
       - run: cd backend && go vet ./...
       # -timeout bounds a single `go test` invocation, not the job; the full

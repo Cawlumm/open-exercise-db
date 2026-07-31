@@ -1,8 +1,12 @@
 <!--
-Scratch file, not part of this project's documentation set. Drafted as the
-basis for an upstream bug report against github.com/danielgtaylor/huma. Not
-linked from README.md, DESIGN.md, CONVENTIONS.md, or PHASE1_BUILD_PLAN.md —
-delete or move once filed.
+Not part of this project's documentation set — kept as the record behind the
+local workaround in backend/internal/api/api.go (trimListOWS).
+
+FILED UPSTREAM: https://github.com/danielgtaylor/huma/issues/1084
+
+When that issue is fixed and this project moves to a huma release containing
+the fix, delete trimListOWS and its call in checkNotModified, and delete this
+file. Until then the workaround is load-bearing.
 -->
 
 # `conditional.Params.PreconditionFailed` rejects RFC 9110-legal `If-None-Match`/`If-Match` lists with OWS after a comma
@@ -52,12 +56,17 @@ the complete response body.
    }
    ```
 
-   `strings.Trim(value, "\"")` only removes leading/trailing characters
-   that are themselves `"`. Given ` "b"` (leading space), the leading
-   character is a space, not `"`, so `Trim` stops immediately at the front
-   and removes nothing from that side — the result is ` "b"` un-quoted at
-   the front, `b"`... — a value that can never equal the bare tag `b` a
-   caller passes into `PreconditionFailed`.
+   `strings.Trim(value, "\"")` only removes leading and trailing characters
+   that are themselves `"`. Given ` "b"` the leading character is a space,
+   not a quote, so `Trim` stops immediately on that side and strips only the
+   trailing quote:
+
+   ```
+   input=" \"b\""   Trim(input, "\"") = " \"b"   equals bare tag "b"? false
+   ```
+
+   The element keeps both its leading space and its opening quote, so it can
+   never equal the bare tag a caller passes into `PreconditionFailed`.
 
 3. `PreconditionFailed` (`conditional/params.go:66-152`) then compares
    `trimETag(match) == etag` for each list element, so the space-tainted
