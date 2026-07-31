@@ -14,7 +14,7 @@ func TestGetExercise_NotFound(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 
-	_, err := GetExercise(ctx, s, &GetExerciseInput{ID: "00000000-0000-0000-0000-000000000000"})
+	_, err := GetExercise(ctx, s, "", &GetExerciseInput{ID: "00000000-0000-0000-0000-000000000000"})
 	if err == nil {
 		t.Fatal("GetExercise(nonexistent): expected error, got nil")
 	}
@@ -39,7 +39,7 @@ func TestGetExercise_ArchivedIsNotFound(t *testing.T) {
 		muscleGroup: "chest", equipment: "barbell", category: "strength", status: "archived",
 	})
 
-	_, err := GetExercise(ctx, s, &GetExerciseInput{ID: archivedID})
+	_, err := GetExercise(ctx, s, "", &GetExerciseInput{ID: archivedID})
 	statusErr, ok := err.(huma.StatusError)
 	if !ok || statusErr.GetStatus() != http.StatusNotFound {
 		t.Fatalf("GetExercise(archived) error = %v, want a 404 huma.StatusError", err)
@@ -86,7 +86,7 @@ func TestListExercises_FilterAndPaginationPassthrough(t *testing.T) {
 	})
 
 	t.Run("filters pass through to the store unchanged", func(t *testing.T) {
-		out, err := ListExercises(ctx, s, &ListExercisesInput{MuscleGroup: "chest"})
+		out, err := ListExercises(ctx, s, "", &ListExercisesInput{MuscleGroup: "chest"})
 		if err != nil {
 			t.Fatalf("ListExercises: unexpected error: %v", err)
 		}
@@ -105,7 +105,7 @@ func TestListExercises_FilterAndPaginationPassthrough(t *testing.T) {
 	})
 
 	t.Run("page/per_page pass through to the store unchanged", func(t *testing.T) {
-		out, err := ListExercises(ctx, s, &ListExercisesInput{Page: 1, PerPage: 2})
+		out, err := ListExercises(ctx, s, "", &ListExercisesInput{Page: 1, PerPage: 2})
 		if err != nil {
 			t.Fatalf("ListExercises: unexpected error: %v", err)
 		}
@@ -119,7 +119,7 @@ func TestListExercises_FilterAndPaginationPassthrough(t *testing.T) {
 			t.Errorf("Page/PerPage = %d/%d, want 1/2", out.Body.Page, out.Body.PerPage)
 		}
 
-		out2, err := ListExercises(ctx, s, &ListExercisesInput{Page: 2, PerPage: 2})
+		out2, err := ListExercises(ctx, s, "", &ListExercisesInput{Page: 2, PerPage: 2})
 		if err != nil {
 			t.Fatalf("ListExercises page 2: unexpected error: %v", err)
 		}
@@ -129,7 +129,7 @@ func TestListExercises_FilterAndPaginationPassthrough(t *testing.T) {
 	})
 
 	t.Run("no filter returns every exercise", func(t *testing.T) {
-		out, err := ListExercises(ctx, s, &ListExercisesInput{})
+		out, err := ListExercises(ctx, s, "", &ListExercisesInput{})
 		if err != nil {
 			t.Fatalf("ListExercises: unexpected error: %v", err)
 		}
@@ -154,7 +154,7 @@ func TestListExercises_LocaleFallbackSurfacedInResponse(t *testing.T) {
 	// reports instructions falling back to en while name stays fr/machine.
 	seedTranslation(t, ctx, pool, revisionID, "fr", "Presse à cuisses", nil, nil, "machine")
 
-	out, err := ListExercises(ctx, s, &ListExercisesInput{Locale: "fr"})
+	out, err := ListExercises(ctx, s, "", &ListExercisesInput{Locale: "fr"})
 	if err != nil {
 		t.Fatalf("ListExercises: unexpected error: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestGetExercise_LocaleFallback(t *testing.T) {
 		"Jalón al pecho", []string{"Dominada asistida"}, []string{"Agarra la barra.", "Tira hacia el pecho."}, "human")
 
 	t.Run("no locale requested behaves like en", func(t *testing.T) {
-		out, err := GetExercise(ctx, s, &GetExerciseInput{ID: exerciseID})
+		out, err := GetExercise(ctx, s, "", &GetExerciseInput{ID: exerciseID})
 		if err != nil {
 			t.Fatalf("GetExercise: unexpected error: %v", err)
 		}
@@ -200,7 +200,7 @@ func TestGetExercise_LocaleFallback(t *testing.T) {
 	})
 
 	t.Run("es locale fully covered", func(t *testing.T) {
-		out, err := GetExercise(ctx, s, &GetExerciseInput{ID: exerciseID, Locale: "es"})
+		out, err := GetExercise(ctx, s, "", &GetExerciseInput{ID: exerciseID, Locale: "es"})
 		if err != nil {
 			t.Fatalf("GetExercise: unexpected error: %v", err)
 		}
@@ -233,7 +233,7 @@ func TestListExercises_PerPageCapEnforced(t *testing.T) {
 	})
 
 	_, testAPI := humatest.New(t)
-	registerExerciseRoutes(testAPI, s)
+	registerExerciseRoutes(testAPI, s, "")
 
 	t.Run("per_page over 100 is rejected", func(t *testing.T) {
 		resp := testAPI.Get("/api/v1/exercises?per_page=101")
@@ -278,7 +278,7 @@ func TestListExercises_ConditionalRequestReturns304(t *testing.T) {
 	})
 
 	_, testAPI := humatest.New(t)
-	registerExerciseRoutes(testAPI, s)
+	registerExerciseRoutes(testAPI, s, "")
 
 	first := testAPI.Get("/api/v1/exercises")
 	if first.Code != http.StatusOK {
@@ -350,7 +350,7 @@ func TestListExercises_ConditionalRequestHandlesListOWS(t *testing.T) {
 	})
 
 	_, testAPI := humatest.New(t)
-	registerExerciseRoutes(testAPI, s)
+	registerExerciseRoutes(testAPI, s, "")
 
 	first := testAPI.Get("/api/v1/exercises")
 	if first.Code != http.StatusOK {
@@ -404,7 +404,7 @@ func TestGetExercise_ConditionalRequestReturns304(t *testing.T) {
 	})
 
 	_, testAPI := humatest.New(t)
-	registerExerciseRoutes(testAPI, s)
+	registerExerciseRoutes(testAPI, s, "")
 
 	first := testAPI.Get("/api/v1/exercises/" + exerciseID)
 	if first.Code != http.StatusOK {

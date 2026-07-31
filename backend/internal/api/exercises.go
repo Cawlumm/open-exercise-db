@@ -10,22 +10,24 @@ import (
 	"github.com/danielgtaylor/huma/v2/conditional"
 
 	"github.com/Cawlumm/open-exercise-db/internal/contract"
+	"github.com/Cawlumm/open-exercise-db/internal/media"
 	"github.com/Cawlumm/open-exercise-db/internal/model"
 	"github.com/Cawlumm/open-exercise-db/internal/ratelimit"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
 )
 
-// Exercise and Translation are contract.Exercise/contract.Translation —
-// aliased here so every existing reference in this file (Exercise{...},
-// []Exercise, Translation{...}) keeps compiling unchanged. They used to be
-// defined directly in this file; they moved to internal/contract because
-// internal/export needs the exact same type (not a structurally-identical
-// copy) to render GET /exercises/export, and two independently declared Go
-// types both named "Exercise" panic huma's schema registry the moment both
-// are registered on one huma.API — see internal/contract/doc.go for the
-// full incident writeup.
+// Exercise, Translation, and Image are contract.Exercise/contract.
+// Translation/contract.Image — aliased here so every existing reference in
+// this file (Exercise{...}, []Exercise, Translation{...}) keeps compiling
+// unchanged. They used to be defined directly in this file; they moved to
+// internal/contract because internal/export needs the exact same type (not a
+// structurally-identical copy) to render GET /exercises/export, and two
+// independently declared Go types both named "Exercise" panic huma's schema
+// registry the moment both are registered on one huma.API — see
+// internal/contract/doc.go for the full incident writeup.
 type Exercise = contract.Exercise
 type Translation = contract.Translation
+type Image = contract.Image
 
 // Revision is one entry in an exercise's append-only history. SubmittedBy
 // and ReviewedBy (raw user UUIDs in model.Revision) are deliberately
@@ -145,7 +147,11 @@ type ListExerciseTranslationsOutput struct {
 // docs/CONVENTIONS.md section 3's "plain functions, trivially unit-testable"
 // guidance — each closure body is itself the trivially-testable unit; tests
 // call it directly with an input struct, no HTTP round trip.
-func registerExerciseRoutes(hapi huma.API, s *store.Store) {
+// registerExerciseRoutes wires every /exercises operation. imageBaseURL is
+// internal/config.Config.ImageBaseURL, threaded down from Register (api.go)
+// so ListExercises/GetExercise can resolve contract.Exercise.Images[].url —
+// see internal/media.ImageURL for what it controls.
+func registerExerciseRoutes(hapi huma.API, s *store.Store, imageBaseURL string) {
 	huma.Register(hapi, huma.Operation{
 		OperationID: "list-exercises",
 		Method:      http.MethodGet,
@@ -159,7 +165,7 @@ func registerExerciseRoutes(hapi huma.API, s *store.Store) {
 		Metadata: map[string]any{rateLimitTierKey: ratelimit.TierSearch},
 		Errors:   []int{http.StatusTooManyRequests},
 	}, func(ctx context.Context, input *ListExercisesInput) (*ListExercisesOutput, error) {
-		return ListExercises(ctx, s, input)
+		return ListExercises(ctx, s, imageBaseURL, input)
 	})
 
 	huma.Register(hapi, huma.Operation{
@@ -171,7 +177,7 @@ func registerExerciseRoutes(hapi huma.API, s *store.Store) {
 		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierRead},
 		Errors:      []int{http.StatusNotFound, http.StatusTooManyRequests},
 	}, func(ctx context.Context, input *GetExerciseInput) (*GetExerciseOutput, error) {
-		return GetExercise(ctx, s, input)
+		return GetExercise(ctx, s, imageBaseURL, input)
 	})
 
 	huma.Register(hapi, huma.Operation{
@@ -203,7 +209,7 @@ func registerExerciseRoutes(hapi huma.API, s *store.Store) {
 // the sibling handlers below) so handler tests can call it directly with an
 // input struct, per docs/CONVENTIONS.md section 3/6 — no HTTP round trip
 // needed for logic assertions.
-func ListExercises(ctx context.Context, s *store.Store, input *ListExercisesInput) (*ListExercisesOutput, error) {
+func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, input *ListExercisesInput) (*ListExercisesOutput, error) {
 	filter := store.ExerciseFilter{
 		Q:           input.Q,
 		MuscleGroup: input.MuscleGroup,
@@ -222,7 +228,7 @@ func ListExercises(ctx context.Context, s *store.Store, input *ListExercisesInpu
 
 	out := newListExercisesEnvelope(input, total)
 	for _, ex := range exercises {
-		resolved, err := resolveExercise(ctx, s, ex, input.Locale)
+		resolved, err := resolveExercise(ctx, s, ex, input.Locale, imageBaseURL)
 		if err != nil {
 			return nil, mapStoreError(err, "exercise not found")
 		}
@@ -258,13 +264,13 @@ func newListExercisesEnvelope(input *ListExercisesInput, total int) *ListExercis
 	return out
 }
 
-func GetExercise(ctx context.Context, s *store.Store, input *GetExerciseInput) (*GetExerciseOutput, error) {
+func GetExercise(ctx context.Context, s *store.Store, imageBaseURL string, input *GetExerciseInput) (*GetExerciseOutput, error) {
 	ex, err := s.Exercises.Get(ctx, input.ID)
 	if err != nil {
 		return nil, mapStoreError(err, "exercise not found")
 	}
 
-	resolved, err := resolveExercise(ctx, s, ex, input.Locale)
+	resolved, err := resolveExercise(ctx, s, ex, input.Locale, imageBaseURL)
 	if err != nil {
 		return nil, mapStoreError(err, "exercise not found")
 	}
@@ -343,11 +349,12 @@ func ListExerciseTranslations(ctx context.Context, s *store.Store, input *ListEx
 // resolveExercise joins an exercise's static (never-translated) fields to
 // its locale-resolved content. Called once per exercise for both List and
 // Get — store.Translations.GetForRevision is a per-revision call (WO-2's
-// contract), so a page of N exercises costs N additional round trips here.
-// Acceptable for Phase 1: the CDN cache in front (docs/DESIGN.md ->
-// Performance) is what absorbs repeat-read volume, not per-request query
-// count, and per_page is capped at 100.
-func resolveExercise(ctx context.Context, s *store.Store, ex model.Exercise, locale string) (Exercise, error) {
+// contract), so a page of N exercises costs N additional round trips here,
+// plus one more for s.Media.ListImagesByIDs below. Acceptable for Phase 1:
+// the CDN cache in front (docs/DESIGN.md -> Performance) is what absorbs
+// repeat-read volume, not per-request query count, and per_page is capped
+// at 100.
+func resolveExercise(ctx context.Context, s *store.Store, ex model.Exercise, locale, imageBaseURL string) (Exercise, error) {
 	if ex.CurrentRevision == nil {
 		// store.Exercises.List/Get always join to current_revision_id;
 		// nil here means that join produced no row, which is a store
@@ -359,6 +366,11 @@ func resolveExercise(ctx context.Context, s *store.Store, ex model.Exercise, loc
 	resolved, err := s.Translations.GetForRevision(ctx, rev.ID, locale)
 	if err != nil {
 		return Exercise{}, fmt.Errorf("resolve translation for exercise %s: %w", ex.ID, err)
+	}
+
+	images, err := s.Media.ListImagesByIDs(ctx, rev.ImageIDs)
+	if err != nil {
+		return Exercise{}, fmt.Errorf("resolve images for exercise %s: %w", ex.ID, err)
 	}
 
 	return Exercise{
@@ -376,7 +388,7 @@ func resolveExercise(ctx context.Context, s *store.Store, ex model.Exercise, loc
 		Mechanic:         rev.Mechanic,
 		Force:            rev.Force,
 		Level:            rev.Level,
-		ImageIDs:         rev.ImageIDs,
+		Images:           media.BuildImages(images, imageBaseURL),
 		VideoIDs:         rev.VideoIDs,
 		License:          rev.License,
 		AttributionText:  rev.AttributionText,

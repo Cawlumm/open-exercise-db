@@ -29,13 +29,40 @@ type Exercise struct {
 	Mechanic         *string  `json:"mechanic,omitempty" doc:"compound or isolation"`
 	Force            *string  `json:"force,omitempty" doc:"push, pull, or static"`
 	Level            *string  `json:"level,omitempty" doc:"beginner, intermediate, or advanced"`
-	ImageIDs         []string `json:"image_ids"`
+	Images           []Image  `json:"images" doc:"Re-hosted images for this exercise, each carrying enough to fetch and render it — see the Image schema"`
 	VideoIDs         []string `json:"video_ids"`
 	License          *string  `json:"license,omitempty" doc:"Per-revision license, e.g. Unlicense or CC-BY-SA-4.0 — provenance is honest per-exercise rather than assuming one license for the whole export"`
 	AttributionText  *string  `json:"attribution_text,omitempty"`
 	SourceURL        *string  `json:"source_url,omitempty"`
 
 	Translation Translation `json:"translation" doc:"Locale-resolved name/aliases/instructions — see the Translation schema for how each field's served locale and machine-origin flag are reported"`
+}
+
+// Image is one re-hosted exercise image, resolved to a URL a client can
+// fetch directly — the fix for the defect this type was introduced to close:
+// GET /exercises previously returned only opaque image_ids UUIDs with no
+// resolution path, so a consumer could never actually display an image.
+// Modeled on Open Food Facts' own product image metadata (an id/URL plus
+// size and provenance, letting the client construct or follow the URL
+// itself) rather than inlining bytes — bytes never belong in a JSON API
+// response any more than they belong in Postgres (internal/media's package
+// doc has the storage-boundary rationale).
+//
+// URL is resolved by internal/media.BuildImages at read time from
+// internal/config.Config.ImageBaseURL: pointed at an external CDN/object-store
+// host when that's configured (production, once Phase 2's R2 migration
+// lands), or at this API's own GET /api/v1/images/{id} route
+// (internal/api/images.go) when it isn't (local dev, self-host) — see that
+// config field's doc comment for the full rationale. Either way the client
+// never has to know which mode is active; it just follows the URL.
+type Image struct {
+	ID              string  `json:"id"`
+	URL             string  `json:"url" doc:"Directly fetchable — either an external CDN/object-store URL or this API's own GET /api/v1/images/{id}, depending on server configuration"`
+	Width           *int    `json:"width,omitempty"`
+	Height          *int    `json:"height,omitempty"`
+	ContentType     string  `json:"content_type" doc:"The real, stored content type (e.g. image/jpeg) — never guessed from a file extension"`
+	License         *string `json:"license,omitempty"`
+	AttributionText *string `json:"attribution_text,omitempty"`
 }
 
 // Translation renders model.ResolvedTranslation (docs/PHASE1_BUILD_PLAN.md's

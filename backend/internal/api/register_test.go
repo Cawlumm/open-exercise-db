@@ -6,6 +6,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/humatest"
 
 	"github.com/Cawlumm/open-exercise-db/internal/export"
+	"github.com/Cawlumm/open-exercise-db/internal/media"
 	"github.com/Cawlumm/open-exercise-db/internal/ratelimit"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
 )
@@ -43,10 +44,19 @@ func TestRegister_DoesNotPanic(t *testing.T) {
 	}()
 
 	s := store.New(nil)
-	cache := export.NewCache(export.DefaultCacheTTL)
+	cache := export.NewCache(export.DefaultCacheTTL, "")
 	limiter := ratelimit.NewLimiter(ratelimit.DefaultConfig())
 	t.Cleanup(limiter.Close)
 	_, hapi := humatest.New(t)
 
-	Register(hapi, s, cache, limiter)
+	// mediaStore only needs to be non-nil enough to satisfy the parameter —
+	// like s's nil pool above, registration never calls into it (no request
+	// is made in this test), only huma's schema derivation over GetImageInput/
+	// GetImageOutput's Go types.
+	mediaStore, err := media.NewFilesystemStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("init media store: %v", err)
+	}
+
+	Register(hapi, s, cache, limiter, mediaStore, "")
 }

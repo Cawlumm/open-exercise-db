@@ -13,6 +13,7 @@ import (
 
 	"github.com/Cawlumm/open-exercise-db/internal/contract"
 	"github.com/Cawlumm/open-exercise-db/internal/export"
+	"github.com/Cawlumm/open-exercise-db/internal/media"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
 )
 
@@ -187,12 +188,12 @@ func TestExportExercises_KeySetMatchesGetExercise(t *testing.T) {
 		t.Fatalf("seed exercise: %v", err)
 	}
 
-	getOut, err := GetExercise(ctx, s, &GetExerciseInput{ID: result.ExerciseID})
+	getOut, err := GetExercise(ctx, s, "", &GetExerciseInput{ID: result.ExerciseID})
 	if err != nil {
 		t.Fatalf("GetExercise: %v", err)
 	}
 
-	cache := export.NewCache(export.DefaultCacheTTL)
+	cache := export.NewCache(export.DefaultCacheTTL, "")
 	exportOut, err := ExportExercises(ctx, s, cache, &ExportExercisesInput{})
 	if err != nil {
 		t.Fatalf("ExportExercises: %v", err)
@@ -226,7 +227,7 @@ func TestExportExercises_PinnedKeySet(t *testing.T) {
 		t.Fatalf("seed exercise: %v", err)
 	}
 
-	cache := export.NewCache(export.DefaultCacheTTL)
+	cache := export.NewCache(export.DefaultCacheTTL, "")
 	out, err := ExportExercises(ctx, s, cache, &ExportExercisesInput{})
 	if err != nil {
 		t.Fatalf("ExportExercises: %v", err)
@@ -239,7 +240,7 @@ func TestExportExercises_PinnedKeySet(t *testing.T) {
 	want := []string{
 		"id", "slug", "source_id", "status", "created_at", "updated_at",
 		"revision_id", "muscle_group", "secondary_muscles", "category", "equipment",
-		"mechanic", "force", "level", "image_ids", "video_ids",
+		"mechanic", "force", "level", "images", "video_ids",
 		"license", "attribution_text", "source_url", "translation",
 		"translation.requested_locale",
 		"translation.name", "translation.name_locale", "translation.name_machine_origin",
@@ -269,7 +270,7 @@ func TestExportExercises_InstructionsIsAnArrayNotAFlattenedString(t *testing.T) 
 		t.Fatalf("seed exercise: %v", err)
 	}
 
-	cache := export.NewCache(export.DefaultCacheTTL)
+	cache := export.NewCache(export.DefaultCacheTTL, "")
 	out, err := ExportExercises(ctx, s, cache, &ExportExercisesInput{})
 	if err != nil {
 		t.Fatalf("ExportExercises: %v", err)
@@ -314,7 +315,7 @@ func TestExportExercises_ExcludesArchivedExercises(t *testing.T) {
 		muscleGroup: "back", equipment: "cable", category: "strength", status: "archived",
 	})
 
-	cache := export.NewCache(export.DefaultCacheTTL)
+	cache := export.NewCache(export.DefaultCacheTTL, "")
 	out, err := ExportExercises(ctx, s, cache, &ExportExercisesInput{})
 	if err != nil {
 		t.Fatalf("ExportExercises: %v", err)
@@ -346,7 +347,7 @@ func TestExportExercises_ConditionalRequestReturns304(t *testing.T) {
 		muscleGroup: "chest", equipment: "barbell", category: "strength",
 	})
 
-	cache := export.NewCache(export.DefaultCacheTTL)
+	cache := export.NewCache(export.DefaultCacheTTL, "")
 	_, testAPI := humatest.New(t)
 	registerExportRoutes(testAPI, s, cache)
 
@@ -430,7 +431,7 @@ func TestExportExercises_CacheAvoidsRequeryAndInvalidateTriggersRebuild(t *testi
 		muscleGroup: "chest", equipment: "barbell", category: "strength",
 	})
 
-	cache := export.NewCache(export.DefaultCacheTTL)
+	cache := export.NewCache(export.DefaultCacheTTL, "")
 	_, testAPI := humatest.New(t)
 	registerExportRoutes(testAPI, s, cache)
 
@@ -468,4 +469,69 @@ func TestExportExercises_CacheAvoidsRequeryAndInvalidateTriggersRebuild(t *testi
 	if !strings.Contains(rebuilt.Body.String(), `"total":2`) {
 		t.Errorf("rebuilt body missing total:2: %s", rebuilt.Body.String())
 	}
+}
+
+// TestExportExercises_ImagesURLModes confirms GET /exercises/export resolves
+// Images[].url the same two ways GET /exercises/{id} does (see
+// TestGetExercise_ImagesURL_LocalModeFallsBackToImagesRoute/
+// ...BaseURLModePointsAtExternalHost in exercises_test.go) — export.Cache
+// captures imageBaseURL once at construction (export.go's NewCache) rather
+// than taking it per request, so this is the one test that actually
+// exercises that plumbing rather than assuming it from the Cache's own code.
+func TestExportExercises_ImagesURLModes(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+
+	width, height := 800, 600
+	storageKey := "exercises/Bench_Press/0.jpg"
+	imageID, err := s.Media.InsertImage(ctx, store.InsertImageInput{
+		StorageKey:  storageKey,
+		ContentType: "image/jpeg",
+		Width:       &width,
+		Height:      &height,
+		Status:      "approved",
+	})
+	if err != nil {
+		t.Fatalf("InsertImage: %v", err)
+	}
+
+	fixture := fullFixtureImport("Bench_Press", "bench-press")
+	fixture.Revision.ImageIDs = []string{imageID}
+	result, err := s.Exercises.UpsertImport(ctx, fixture)
+	if err != nil {
+		t.Fatalf("seed exercise: %v", err)
+	}
+
+	t.Run("ImageBaseURL unset falls back to the local route", func(t *testing.T) {
+		cache := export.NewCache(export.DefaultCacheTTL, "")
+		out, err := ExportExercises(ctx, s, cache, &ExportExercisesInput{})
+		if err != nil {
+			t.Fatalf("ExportExercises: %v", err)
+		}
+		entry := findExported(out.Body, result.ExerciseID)
+		if entry == nil || len(entry.Images) != 1 {
+			t.Fatalf("exported entry missing its image: %+v", entry)
+		}
+		want := media.ImageURL("", imageID, storageKey)
+		if got := entry.Images[0].URL; got != want {
+			t.Errorf("Images[0].URL = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("ImageBaseURL set points at the external host", func(t *testing.T) {
+		const base = "https://images.example.com"
+		cache := export.NewCache(export.DefaultCacheTTL, base)
+		out, err := ExportExercises(ctx, s, cache, &ExportExercisesInput{})
+		if err != nil {
+			t.Fatalf("ExportExercises: %v", err)
+		}
+		entry := findExported(out.Body, result.ExerciseID)
+		if entry == nil || len(entry.Images) != 1 {
+			t.Fatalf("exported entry missing its image: %+v", entry)
+		}
+		want := base + "/" + storageKey
+		if got := entry.Images[0].URL; got != want {
+			t.Errorf("Images[0].URL = %q, want %q", got, want)
+		}
+	})
 }

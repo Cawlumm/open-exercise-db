@@ -186,7 +186,7 @@ func TestCache_Get_CachesUntilInvalidated(t *testing.T) {
 	ctx := context.Background()
 	seedFixture(t, ctx, s, "Bench_Press", "bench-press", "Bench Press")
 
-	c := NewCache(DefaultCacheTTL)
+	c := NewCache(DefaultCacheTTL, "")
 	first, err := c.Get(ctx, s)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
@@ -235,7 +235,7 @@ func TestCache_Get_ETagStableAcrossRebuildOfUnchangedData(t *testing.T) {
 	ctx := context.Background()
 	seedFixture(t, ctx, s, "Bench_Press", "bench-press", "Bench Press")
 
-	c := NewCache(DefaultCacheTTL)
+	c := NewCache(DefaultCacheTTL, "")
 	first, err := c.Get(ctx, s)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
@@ -261,7 +261,7 @@ func TestCache_Get_ZeroTTLNeverExpires(t *testing.T) {
 	ctx := context.Background()
 	seedFixture(t, ctx, s, "Bench_Press", "bench-press", "Bench Press")
 
-	c := NewCache(0)
+	c := NewCache(0, "")
 	first, err := c.Get(ctx, s)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
@@ -287,7 +287,7 @@ func TestBuildBlob_ResolvesEnglishDefault(t *testing.T) {
 	ctx := context.Background()
 	id := seedFixture(t, ctx, s, "Bench_Press", "bench-press", "Bench Press")
 
-	blob, err := buildBlob(ctx, s)
+	blob, err := buildBlob(ctx, s, "")
 	if err != nil {
 		t.Fatalf("buildBlob: %v", err)
 	}

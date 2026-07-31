@@ -21,6 +21,7 @@ import (
 	"github.com/Cawlumm/open-exercise-db/internal/config"
 	"github.com/Cawlumm/open-exercise-db/internal/database"
 	"github.com/Cawlumm/open-exercise-db/internal/export"
+	"github.com/Cawlumm/open-exercise-db/internal/media"
 	"github.com/Cawlumm/open-exercise-db/internal/ratelimit"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
 )
@@ -46,12 +47,24 @@ func main() {
 	}
 
 	stores := store.New(pool)
+
+	// mediaStore backs GET /api/v1/images/{id} — the same storage the
+	// bootstrap importer (cmd/import-freeexercisedb) already writes re-hosted
+	// images to via cfg.MediaDir, now resolved to an absolute path (see
+	// config.Load) so this process serves the same files regardless of its
+	// working directory when it was started.
+	mediaStore, err := media.NewFilesystemStore(cfg.MediaDir)
+	if err != nil {
+		log.Fatalf("init media store at %s: %v", cfg.MediaDir, err)
+	}
+	log.Printf("media store rooted at %s (IMAGE_BASE_URL=%q)", cfg.MediaDir, cfg.ImageBaseURL)
+
 	// exportCache is constructed here, not inside internal/api, per
-	// docs/CONVENTIONS.md section 2's DI pattern — same shape as a
-	// hypothetical media.Store parameter. It's owned by main so a future
-	// Phase 2 wiring (e.g. calling exportCache.Invalidate() from the
-	// submission-approval handler) has an obvious place to reach it from.
-	exportCache := export.NewCache(export.DefaultCacheTTL)
+	// docs/CONVENTIONS.md section 2's DI pattern — same shape as mediaStore
+	// above. It's owned by main so a future Phase 2 wiring (e.g. calling
+	// exportCache.Invalidate() from the submission-approval handler) has an
+	// obvious place to reach it from.
+	exportCache := export.NewCache(export.DefaultCacheTTL, cfg.ImageBaseURL)
 
 	// limiter backs docs/PHASE1_BUILD_PLAN.md WO-7's origin rate-limit
 	// backstop (internal/ratelimit's package doc has the honest read on
@@ -93,7 +106,7 @@ func main() {
 	humaConfig.Servers = []*huma.Server{{URL: "/", Description: "Same origin as the API"}}
 
 	hapi := humago.New(mux, humaConfig)
-	api.Register(hapi, stores, exportCache, limiter)
+	api.Register(hapi, stores, exportCache, limiter, mediaStore, cfg.ImageBaseURL)
 
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,

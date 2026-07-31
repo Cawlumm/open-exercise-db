@@ -7,6 +7,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/humatest"
 
 	"github.com/Cawlumm/open-exercise-db/internal/export"
+	"github.com/Cawlumm/open-exercise-db/internal/media"
 	"github.com/Cawlumm/open-exercise-db/internal/ratelimit"
 )
 
@@ -36,9 +37,13 @@ func newRegisteredTestAPI(t *testing.T, cfg ratelimit.Config) humatest.TestAPI {
 	limiter := ratelimit.NewLimiter(cfg)
 	t.Cleanup(limiter.Close)
 
-	cache := export.NewCache(export.DefaultCacheTTL)
+	cache := export.NewCache(export.DefaultCacheTTL, "")
+	mediaStore, err := media.NewFilesystemStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("init media store: %v", err)
+	}
 	_, hapi := humatest.New(t)
-	Register(hapi, s, cache, limiter)
+	Register(hapi, s, cache, limiter, mediaStore, "")
 
 	return hapi.(humatest.TestAPI)
 }
