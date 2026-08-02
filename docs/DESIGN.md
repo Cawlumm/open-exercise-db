@@ -289,14 +289,21 @@ shape exists to close.
 `url` is resolved from `IMAGE_BASE_URL` (`internal/config.Config.ImageBaseURL`,
 `internal/media.ImageURL`):
 
-- **Set** (production, once R2 lands): `{IMAGE_BASE_URL}/{storage_key}`, pointing straight at
-  object storage/CDN — image bytes never touch the API process, the same split OFF gets from
-  `images.openfoodfacts.org`.
-- **Unset** (local dev, self-host — the Phase 1 default): falls back to this API's own
+- **Set** (production): `{IMAGE_BASE_URL}/{storage_key}`, pointing straight at object
+  storage/CDN — image bytes never touch the API process, the same split OFF gets from
+  `images.openfoodfacts.org`. Must be a custom domain: Cloudflare rate-limits the managed
+  `*.r2.dev` subdomain and documents it as development-only.
+- **Unset** (local dev, self-host — the default): falls back to this API's own
   `GET /images/{id}`, which streams the identical bytes through `media.Store.Get`. Long
   `Cache-Control: immutable` (image bytes never change once stored — a re-import that matches
   an existing upload reuses its row rather than writing a new one) and the same conditional-GET
   `ETag`/`If-None-Match` handling every other `GET` in this API uses.
+
+The server logs a warning when `IMAGE_BASE_URL` and the storage backend disagree
+(`internal/config.Config.Warnings`) — neither combination is refused, because filesystem
+storage plus a set `IMAGE_BASE_URL` is also how a self-hoster serving `MEDIA_DIR` through
+nginx would legitimately configure this, and the process can't tell that apart from a
+misconfiguration. Silence means the two agree.
 
 Either way `contract.Exercise` doesn't change shape — only which host the URL points at, which
 is exactly the config-not-code seam that lets production adopt OFF's separate-image-host model
@@ -304,7 +311,11 @@ later without touching a client.
 
 **Bytes never live in Postgres**, mirroring OFF's own product-image handling: `exercise_images`
 stores metadata only (`storage_key`, `content_type`, dimensions, license/attribution),
-`media.Store` (filesystem in Phase 1, R2 in Phase 2) holds the actual bytes. A relational
+`media.Store` holds the actual bytes — `R2Store` against Cloudflare R2 when the four `R2_*`
+settings are present, `FilesystemStore` at `MEDIA_DIR` otherwise. Both accept exactly the same
+key space (`media.ValidateKey`), which is what makes `cmd/migrate-media` a straight copy with
+no database migration: `storage_key` is identical on both sides, so moving backends is a config
+change and the rows never move. A relational
 database is the wrong place for binary blobs at any real scale — no query ever needs to filter
 or join on image *content*, only its metadata, so storing bytes there would just make routine
 backups/replication larger and slower for zero query benefit.

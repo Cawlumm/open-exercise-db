@@ -1,0 +1,229 @@
+// Command migrate-media copies every re-hosted image from the local
+// filesystem media directory into the configured object-storage bucket,
+// preserving storage keys exactly.
+//
+// Keys are preserved deliberately: exercise_images.storage_key is what both
+// internal/api's image route and internal/export resolve URLs from, so a
+// copy that keeps keys identical needs no database migration and no
+// coordinated cutover. Point IMAGE_BASE_URL (or the R2 credentials) at the
+// new backend and the same rows keep resolving — the two backends are
+// interchangeable precisely because media.ValidateKey gives them one shared
+// key space.
+//
+// Idempotent by construction rather than by bookkeeping: every object is
+// re-uploaded on every run, and object storage is last-write-wins (pinned by
+// TestR2Store_OverwriteIsLastWriteWins). A resumed or repeated run is
+// therefore always safe, at the cost of re-sending bytes that are already
+// there. For this dataset that trade is obviously right — ~1,700 objects
+// averaging tens of KB, against a 1M/month Class A operation allowance — and
+// it avoids both a HeadObject round-trip per key and a Head method on
+// media.Store that nothing else would use.
+//
+// Usage:
+//
+//	go run ./cmd/migrate-media            # copy MEDIA_DIR -> R2
+//	go run ./cmd/migrate-media -dry-run   # list what would be copied
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io/fs"
+	"log"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/Cawlumm/open-exercise-db/internal/config"
+	"github.com/Cawlumm/open-exercise-db/internal/media"
+)
+
+func main() {
+	dryRun := flag.Bool("dry-run", false, "list the keys that would be copied without uploading")
+	workers := flag.Int("workers", 8, "number of concurrent uploads")
+	flag.Parse()
+
+	cfg := config.Load()
+
+	if !cfg.UsesR2() {
+		log.Fatal("object storage is not configured: set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, " +
+			"R2_SECRET_ACCESS_KEY and R2_BUCKET (there is nothing to migrate to otherwise)")
+	}
+	if *workers < 1 {
+		log.Fatalf("-workers must be at least 1, got %d", *workers)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	// Source is always the filesystem: this command exists to get bytes *off*
+	// local disk. Constructed directly rather than through media.NewStore,
+	// which would select R2 here and make the copy a no-op against itself.
+	src, err := media.NewFilesystemStore(cfg.MediaDir)
+	if err != nil {
+		log.Fatalf("open source media directory %s: %v", cfg.MediaDir, err)
+	}
+
+	dst, err := media.NewR2Store(
+		cfg.R2AccountID, cfg.R2AccessKeyID, cfg.R2SecretAccessKey, cfg.R2Bucket,
+	)
+	if err != nil {
+		log.Fatalf("init destination: %v", err)
+	}
+
+	keys, err := collectKeys(cfg.MediaDir)
+	if err != nil {
+		log.Fatalf("scan %s: %v", cfg.MediaDir, err)
+	}
+	if len(keys) == 0 {
+		log.Fatalf("no files found under %s — is MEDIA_DIR pointing at the right place?", cfg.MediaDir)
+	}
+
+	log.Printf("copying %d objects: %s -> r2 bucket %q", len(keys), cfg.MediaDir, cfg.R2Bucket)
+	if *dryRun {
+		for _, k := range keys {
+			fmt.Println(k)
+		}
+		log.Printf("dry run: %d objects would be copied, nothing uploaded", len(keys))
+		return
+	}
+
+	start := time.Now()
+	copied, failed := run(ctx, src, dst, keys, *workers)
+
+	log.Printf("done in %s: %d copied, %d failed", time.Since(start).Round(time.Millisecond), copied, failed)
+	if failed > 0 {
+		// Non-zero exit so a scripted run can't mistake a partial copy for a
+		// finished one. Re-running is safe and will retry the failures.
+		os.Exit(1)
+	}
+}
+
+// collectKeys walks root and returns every regular file as a storage key
+// relative to root, slash-separated.
+//
+// Slash-separated regardless of platform because storage keys are not paths:
+// they are opaque strings stored in exercise_images.storage_key and used
+// verbatim as object names. Walking on Windows yields backslashes, and
+// letting those through would write keys like `exercises\Ab_Roller\0.jpg`
+// that no Linux-hosted API instance could ever look up — a corruption that
+// would only surface after deploy, on someone else's machine.
+func collectKeys(root string) ([]string, error) {
+	var keys []string
+
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		// Skip FilesystemStore.Put's interrupted-write temp files rather than
+		// faithfully copying a half-written image into object storage under a
+		// key nothing will ever read.
+		if strings.HasSuffix(path, ".tmp") {
+			log.Printf("skipping temp file %s", path)
+			return nil
+		}
+
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return fmt.Errorf("relative path for %s: %w", path, err)
+		}
+		key := filepath.ToSlash(rel)
+
+		// The same validation both stores apply, run here so a bad key is
+		// reported once with its full path rather than as N opaque upload
+		// failures.
+		if err := media.ValidateKey(key); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		keys = append(keys, key)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return keys, nil
+}
+
+// run copies keys from src to dst using workers concurrent uploads, and
+// returns how many succeeded and failed.
+//
+// A failed object is logged and counted, never fatal: one unreadable file or
+// one transient 5xx should not abandon the other 1,700 objects when the whole
+// command is safe to re-run. The non-zero exit in main is what stops a
+// partial copy from being mistaken for a complete one.
+func run(ctx context.Context, src, dst media.Store, keys []string, workers int) (copied, failed int64) {
+	if workers > len(keys) {
+		workers = len(keys)
+	}
+
+	work := make(chan string)
+	var wg sync.WaitGroup
+
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for key := range work {
+				if err := copyOne(ctx, src, dst, key); err != nil {
+					if errors.Is(err, context.Canceled) {
+						return
+					}
+					log.Printf("copy %s: %v", key, err)
+					atomic.AddInt64(&failed, 1)
+					continue
+				}
+				if n := atomic.AddInt64(&copied, 1); n%200 == 0 {
+					log.Printf("  %d/%d copied", n, len(keys))
+				}
+			}
+		}()
+	}
+
+	for _, key := range keys {
+		select {
+		case work <- key:
+		case <-ctx.Done():
+			// Stop feeding on Ctrl-C; already-started uploads finish or fail
+			// on their own context, and the counts below reflect reality.
+			close(work)
+			wg.Wait()
+			return atomic.LoadInt64(&copied), atomic.LoadInt64(&failed)
+		}
+	}
+	close(work)
+	wg.Wait()
+
+	return atomic.LoadInt64(&copied), atomic.LoadInt64(&failed)
+}
+
+// copyOne streams one object from src to dst.
+//
+// contentType is passed empty: FilesystemStore has never persisted it (the
+// exercise_images.content_type column is the source of truth — see
+// FilesystemStore.Put), so there is nothing on disk to read it back from,
+// and inferring it from the file extension is exactly the guess this
+// project's image handling avoids. R2Store.Put omits the header entirely
+// when it is empty, leaving the object without a stored Content-Type; the
+// API supplies the real one from the database on every response. Setting it
+// on the objects themselves only matters once IMAGE_BASE_URL points clients
+// straight at the bucket, which is Phase 2 and wants a re-upload pass with
+// the database values anyway.
+func copyOne(ctx context.Context, src, dst media.Store, key string) error {
+	rc, err := src.Get(ctx, key)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+
+	return dst.Put(ctx, key, rc, "")
+}

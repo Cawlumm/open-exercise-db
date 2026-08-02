@@ -49,15 +49,26 @@ func main() {
 	stores := store.New(pool)
 
 	// mediaStore backs GET /api/v1/images/{id} — the same storage the
-	// bootstrap importer (cmd/import-freeexercisedb) already writes re-hosted
-	// images to via cfg.MediaDir, now resolved to an absolute path (see
-	// config.Load) so this process serves the same files regardless of its
-	// working directory when it was started.
-	mediaStore, err := media.NewFilesystemStore(cfg.MediaDir)
+	// bootstrap importer (cmd/import-freeexercisedb) writes re-hosted images
+	// to, selected by the identical media.NewStore call so the two commands
+	// can never disagree about which backend is in play. R2 when its four
+	// credentials are set, otherwise the filesystem at cfg.MediaDir (absolute
+	// — see config.Load — so this process serves the same files regardless of
+	// the working directory it was started from).
+	mediaStore, mediaDesc, err := media.NewStore(media.StoreOptions{
+		R2AccountID:       cfg.R2AccountID,
+		R2AccessKeyID:     cfg.R2AccessKeyID,
+		R2SecretAccessKey: cfg.R2SecretAccessKey,
+		R2Bucket:          cfg.R2Bucket,
+		MediaDir:          cfg.MediaDir,
+	})
 	if err != nil {
-		log.Fatalf("init media store at %s: %v", cfg.MediaDir, err)
+		log.Fatalf("init media store: %v", err)
 	}
-	log.Printf("media store rooted at %s (IMAGE_BASE_URL=%q)", cfg.MediaDir, cfg.ImageBaseURL)
+	log.Printf("media store: %s (IMAGE_BASE_URL=%q)", mediaDesc, cfg.ImageBaseURL)
+	for _, w := range cfg.Warnings() {
+		log.Printf("config warning: %s", w)
+	}
 
 	// exportCache is constructed here, not inside internal/api, per
 	// docs/CONVENTIONS.md section 2's DI pattern — same shape as mediaStore

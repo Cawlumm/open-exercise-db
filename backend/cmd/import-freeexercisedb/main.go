@@ -54,18 +54,25 @@ func main() {
 
 	var mediaStore media.Store
 	if !*dryRun {
-		// cfg.MediaDir is always absolute now (config.Load resolves it) —
-		// logged here so it's obvious which directory this run actually wrote
-		// to, rather than depending on whatever directory the command
-		// happened to be started from (the exact split that previously sent
-		// one run's images to ./data/media and another's to
-		// ./backend/data/media with nothing recording which).
-		log.Printf("re-hosting images to %s", cfg.MediaDir)
-		fsStore, err := media.NewFilesystemStore(cfg.MediaDir)
+		// Same media.NewStore call cmd/api-server makes, so an import and the
+		// server that serves what it wrote can never end up on different
+		// backends. What was selected is logged rather than assumed — the
+		// predecessor bug here was a *relative* cfg.MediaDir sending one run's
+		// images to ./data/media and another's to ./backend/data/media with
+		// nothing recording which, and adding a second backend multiplies the
+		// ways that question can go unanswered.
+		store, desc, err := media.NewStore(media.StoreOptions{
+			R2AccountID:       cfg.R2AccountID,
+			R2AccessKeyID:     cfg.R2AccessKeyID,
+			R2SecretAccessKey: cfg.R2SecretAccessKey,
+			R2Bucket:          cfg.R2Bucket,
+			MediaDir:          cfg.MediaDir,
+		})
 		if err != nil {
-			log.Fatalf("init media store at %s: %v", cfg.MediaDir, err)
+			log.Fatalf("init media store: %v", err)
 		}
-		mediaStore = fsStore
+		log.Printf("re-hosting images to %s", desc)
+		mediaStore = store
 	}
 
 	opts := seed.Options{
