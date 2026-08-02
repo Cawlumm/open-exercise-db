@@ -46,3 +46,6 @@ temp/
 # Local Claude context
 CLAUDE.md
 .claude/
+
+# Wrangler CLI local state (auth, R2 dev artifacts)
+.wrangler/

@@ -2,11 +2,11 @@ package media
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // FilesystemStore implements Store by writing to a local directory. It
@@ -67,6 +67,10 @@ func (fs *FilesystemStore) Put(_ context.Context, key string, r io.Reader, _ str
 }
 
 // Get opens the file at baseDir/key for reading. The caller owns closing it.
+//
+// A missing file is reported as ErrObjectNotFound, matching R2Store.Get, so
+// callers can distinguish "this key was never written" from a permission or
+// I/O failure without knowing which backend they hold.
 func (fs *FilesystemStore) Get(_ context.Context, key string) (io.ReadCloser, error) {
 	path, err := fs.resolve(key)
 	if err != nil {
@@ -74,18 +78,20 @@ func (fs *FilesystemStore) Get(_ context.Context, key string) (io.ReadCloser, er
 	}
 	f, err := os.Open(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("open %s: %w", key, ErrObjectNotFound)
+		}
 		return nil, fmt.Errorf("open %s: %w", key, err)
 	}
 	return f, nil
 }
 
-// resolve joins key onto baseDir and rejects any key that would escape it.
-// Every real caller generates keys itself (e.g. "exercises/<source-id>/0.jpg"),
-// so this never fires in practice — it's a hard boundary against a future
-// caller passing an untrusted key, not a workaround for an observed bug.
+// resolve validates key (ValidateKey — shared with R2Store so both backends
+// accept exactly the same key space, per Store's doc comment) and joins it
+// onto baseDir.
 func (fs *FilesystemStore) resolve(key string) (string, error) {
-	if key == "" || strings.Contains(key, "..") {
-		return "", fmt.Errorf("invalid storage key %q", key)
+	if err := ValidateKey(key); err != nil {
+		return "", err
 	}
 	return filepath.Join(fs.baseDir, filepath.FromSlash(key)), nil
 }

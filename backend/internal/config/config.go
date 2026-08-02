@@ -2,6 +2,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -148,6 +149,62 @@ func Load() Config {
 			UnidentifiedBurst: getEnvInt("OEDB_RATELIMIT_UNIDENTIFIED_BURST", 2),
 		},
 	}
+}
+
+// UsesR2 reports whether the R2 object-storage backend is fully configured.
+// Mirrors internal/media.NewStore's own all-four-or-none rule; a partial
+// configuration reports false here but is a hard error there, so callers
+// that only need to describe the intended backend can use this without
+// duplicating the error case.
+func (c Config) UsesR2() bool {
+	return c.R2AccountID != "" && c.R2AccessKeyID != "" &&
+		c.R2SecretAccessKey != "" && c.R2Bucket != ""
+}
+
+// Warnings returns non-fatal configuration concerns for the caller to log at
+// startup.
+//
+// Both cases below are MediaDir/R2 and ImageBaseURL disagreeing about where
+// image bytes live. Neither is fatal, and that is a deliberate call:
+//
+//   - Filesystem backend with ImageBaseURL set is *usually* wrong (bytes on
+//     local disk, URLs pointing elsewhere — the API returns 200 with
+//     correct-looking JSON while every image 404s for the client). But it is
+//     also exactly how a self-hoster serving MediaDir directly through nginx
+//     or Caddy would configure this, which is a legitimate and arguably
+//     better deployment than proxying bytes through the API process. The
+//     process cannot tell those two apart from inside, so refusing to start
+//     would break a valid setup in order to catch an invalid one.
+//   - R2 backend with ImageBaseURL unset works correctly, but routes every
+//     image byte through GET /api/v1/images/{id} — undoing the point of the
+//     separate-image-host design (docs/DESIGN.md → "Alignment with Open Food
+//     Facts"). Correct but expensive, so: warn, don't fail.
+//
+// What this actually guards against is silence rather than misconfiguration:
+// an operator who sees neither warning knows the two settings agree.
+func (c Config) Warnings() []string {
+	var out []string
+
+	if !c.UsesR2() && c.ImageBaseURL != "" {
+		out = append(out, fmt.Sprintf(
+			"IMAGE_BASE_URL=%q is set but object storage is not configured, so image "+
+				"bytes are served from local disk (%s). Images will 404 for clients "+
+				"unless something else is publishing that directory at IMAGE_BASE_URL.",
+			c.ImageBaseURL, c.MediaDir,
+		))
+	}
+
+	if c.UsesR2() && c.ImageBaseURL == "" {
+		out = append(out, fmt.Sprintf(
+			"object storage is configured (bucket %q) but IMAGE_BASE_URL is unset, so "+
+				"every image byte is proxied through GET /api/v1/images/{id} rather than "+
+				"served directly. Correct, but set IMAGE_BASE_URL to a public bucket or "+
+				"CDN host in production.",
+			c.R2Bucket,
+		))
+	}
+
+	return out
 }
 
 // resolveMediaDir converts dir to an absolute path, so where images actually
