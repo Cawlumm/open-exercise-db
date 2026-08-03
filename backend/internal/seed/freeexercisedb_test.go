@@ -307,7 +307,7 @@ func TestImport_EmptyDatabase_CreatesExercisesAndRevisions(t *testing.T) {
 		t.Errorf("instructions = %v, want 2 separate steps", ex.CurrentRevision.Instructions)
 	}
 
-	terms, err := st.Taxonomy.ListTerms(ctx, "muscle_group", "en")
+	terms, err := st.Taxonomy.ListTerms(ctx, "muscle_group", "en", 1000, 0)
 	if err != nil {
 		t.Fatalf("ListTerms: %v", err)
 	}

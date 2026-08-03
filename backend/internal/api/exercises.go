@@ -86,21 +86,19 @@ type ListExercisesInput struct {
 	Mechanic    string `query:"mechanic" doc:"Taxonomy slug filter: compound or isolation"`
 	Level       string `query:"level" doc:"Taxonomy slug filter: beginner, intermediate, or advanced"`
 	Locale      string `query:"locale" doc:"BCP-47 locale for name/aliases/instructions; falls back to English per-field when untranslated"`
-	Page        int    `query:"page" minimum:"1" default:"1"`
-	PerPage     int    `query:"per_page" minimum:"1" maximum:"100" default:"50" doc:"Results per page; capped at 100 since this is a public, unauthenticated endpoint"`
+	PageParams
 }
 
-// ListExercisesOutput envelopes the page alongside Total (the full matching
-// count, ignoring pagination) so a client can compute page count without a
-// second request.
+// ListExercisesOutput envelopes the page alongside the shared Pagination
+// block (see pagination.go) so a client can compute page count without a
+// second request, and so every collection in this API reports its position
+// the same way.
 type ListExercisesOutput struct {
 	CacheControl string `header:"Cache-Control"`
 	ETag         string `header:"ETag"`
 	Body         struct {
 		Exercises []Exercise `json:"exercises"`
-		Total     int        `json:"total" doc:"Total matching exercises across all pages"`
-		Page      int        `json:"page"`
-		PerPage   int        `json:"per_page"`
+		Pagination
 	}
 }
 
@@ -119,6 +117,7 @@ type GetExerciseOutput struct {
 type ListExerciseRevisionsInput struct {
 	conditional.Params
 	ID string `path:"id" format:"uuid" doc:"Exercise UUID"`
+	PageParams
 }
 
 type ListExerciseRevisionsOutput struct {
@@ -126,19 +125,28 @@ type ListExerciseRevisionsOutput struct {
 	ETag         string `header:"ETag"`
 	Body         struct {
 		Revisions []Revision `json:"revisions" doc:"Newest first; includes superseded revisions, since history is append-only"`
+		Pagination
 	}
 }
 
 type ListExerciseTranslationsInput struct {
 	conditional.Params
 	ID string `path:"id" format:"uuid" doc:"Exercise UUID"`
+	PageParams
 }
 
 type ListExerciseTranslationsOutput struct {
 	CacheControl string `header:"Cache-Control"`
 	ETag         string `header:"ETag"`
 	Body         struct {
-		Locales []TranslationSummary `json:"locales" doc:"One entry per locale with an approved translation of the exercise's current revision"`
+		// Named "translations", not "locales", even though each entry is
+		// keyed by locale: GET /meta/locales already returns a "locales"
+		// array whose items are a completely different type (Locale, just a
+		// code), and one field name meaning two shapes across two endpoints
+		// is the kind of thing a generated client or a human reading the
+		// spec gets wrong exactly once, expensively.
+		Translations []TranslationSummary `json:"translations" doc:"One entry per locale with an approved translation of the exercise's current revision"`
+		Pagination
 	}
 }
 
@@ -226,7 +234,8 @@ func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, inp
 		return nil, mapStoreError(err, "")
 	}
 
-	out := newListExercisesEnvelope(input, total)
+	out := &ListExercisesOutput{}
+	out.Body.Pagination = paginationFor(input.PageParams, total)
 	// Pre-allocated rather than appended onto a nil slice so a zero-result
 	// response serializes as `"exercises": []`, not `"exercises": null`.
 	// encoding/json renders a nil slice as null, and null here breaks the
@@ -251,26 +260,6 @@ func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, inp
 	out.CacheControl = cacheControl
 	out.ETag = etagHeader(tag)
 	return out, nil
-}
-
-// newListExercisesEnvelope builds the envelope shell (page/per_page echoed
-// back, total set) before the caller appends resolved exercises — split out
-// only to keep ListExercises' body readable. CacheControl/ETag are set
-// afterward, once, by the caller via checkNotModified — not here.
-func newListExercisesEnvelope(input *ListExercisesInput, total int) *ListExercisesOutput {
-	out := &ListExercisesOutput{}
-	page := input.Page
-	if page < 1 {
-		page = 1
-	}
-	perPage := input.PerPage
-	if perPage < 1 {
-		perPage = 50
-	}
-	out.Body.Page = page
-	out.Body.PerPage = perPage
-	out.Body.Total = total
-	return out
 }
 
 func GetExercise(ctx context.Context, s *store.Store, imageBaseURL string, input *GetExerciseInput) (*GetExerciseOutput, error) {
@@ -303,12 +292,19 @@ func ListExerciseRevisions(ctx context.Context, s *store.Store, input *ListExerc
 		return nil, mapStoreError(err, "exercise not found")
 	}
 
-	revisions, err := s.Exercises.ListRevisions(ctx, input.ID)
+	total, err := s.Exercises.CountRevisions(ctx, input.ID)
+	if err != nil {
+		return nil, mapStoreError(err, "exercise not found")
+	}
+
+	_, perPage := input.Normalize()
+	revisions, err := s.Exercises.ListRevisions(ctx, input.ID, perPage, input.Offset())
 	if err != nil {
 		return nil, mapStoreError(err, "exercise not found")
 	}
 
 	out := &ListExerciseRevisionsOutput{}
+	out.Body.Pagination = paginationFor(input.PageParams, total)
 	// Empty slice, not nil — see ListExercises for why.
 	out.Body.Revisions = make([]Revision, 0, len(revisions))
 	for _, rev := range revisions {
@@ -333,19 +329,26 @@ func ListExerciseTranslations(ctx context.Context, s *store.Store, input *ListEx
 		return nil, mapStoreError(err, "exercise not found")
 	}
 
-	summaries, err := s.Translations.ListLocalesForExercise(ctx, input.ID)
+	total, err := s.Translations.CountLocalesForExercise(ctx, input.ID)
+	if err != nil {
+		return nil, mapStoreError(err, "exercise not found")
+	}
+
+	_, perPage := input.Normalize()
+	summaries, err := s.Translations.ListLocalesForExercise(ctx, input.ID, perPage, input.Offset())
 	if err != nil {
 		return nil, mapStoreError(err, "exercise not found")
 	}
 
 	out := &ListExerciseTranslationsOutput{}
+	out.Body.Pagination = paginationFor(input.PageParams, total)
 	// Empty slice, not nil — see ListExercises. This endpoint hits the case
 	// most often: an exercise with no translations beyond its revision's own
 	// content is the norm today, so `null` here was the shipped behavior for
 	// every exercise in the dataset.
-	out.Body.Locales = make([]TranslationSummary, 0, len(summaries))
+	out.Body.Translations = make([]TranslationSummary, 0, len(summaries))
 	for _, sum := range summaries {
-		out.Body.Locales = append(out.Body.Locales, TranslationSummary{
+		out.Body.Translations = append(out.Body.Translations, TranslationSummary{
 			Locale:     sum.Locale,
 			Origin:     sum.Origin,
 			Complete:   sum.Complete,

@@ -16,7 +16,7 @@ func TestTaxonomyStore_ListTerms(t *testing.T) {
 	seedTaxonomyTerm(t, ctx, pool, "category", "other", map[string]string{"en": "Other category"})
 
 	t.Run("requested locale served when present", func(t *testing.T) {
-		terms, err := s.Taxonomy.ListTerms(ctx, "muscle_group", "es")
+		terms, err := s.Taxonomy.ListTerms(ctx, "muscle_group", "es", 1000, 0)
 		if err != nil {
 			t.Fatalf("ListTerms: unexpected error: %v", err)
 		}
@@ -33,7 +33,7 @@ func TestTaxonomyStore_ListTerms(t *testing.T) {
 	})
 
 	t.Run("empty locale defaults to english", func(t *testing.T) {
-		terms, err := s.Taxonomy.ListTerms(ctx, "muscle_group", "")
+		terms, err := s.Taxonomy.ListTerms(ctx, "muscle_group", "", 1000, 0)
 		if err != nil {
 			t.Fatalf("ListTerms: unexpected error: %v", err)
 		}
@@ -45,11 +45,11 @@ func TestTaxonomyStore_ListTerms(t *testing.T) {
 	})
 
 	t.Run("slug scoped per facet, not globally unique", func(t *testing.T) {
-		equipment, err := s.Taxonomy.ListTerms(ctx, "equipment", "en")
+		equipment, err := s.Taxonomy.ListTerms(ctx, "equipment", "en", 1000, 0)
 		if err != nil {
 			t.Fatalf("ListTerms(equipment): %v", err)
 		}
-		category, err := s.Taxonomy.ListTerms(ctx, "category", "en")
+		category, err := s.Taxonomy.ListTerms(ctx, "category", "en", 1000, 0)
 		if err != nil {
 			t.Fatalf("ListTerms(category): %v", err)
 		}
@@ -62,7 +62,7 @@ func TestTaxonomyStore_ListTerms(t *testing.T) {
 	})
 
 	t.Run("unknown facet returns empty, not an error", func(t *testing.T) {
-		terms, err := s.Taxonomy.ListTerms(ctx, "not-a-real-facet", "en")
+		terms, err := s.Taxonomy.ListTerms(ctx, "not-a-real-facet", "en", 1000, 0)
 		if err != nil {
 			t.Fatalf("ListTerms: unexpected error: %v", err)
 		}
@@ -128,7 +128,7 @@ func TestTaxonomyStore_UpsertTermTranslation_IsIdempotentAndOverwrites(t *testin
 		t.Fatalf("UpsertTermTranslation (second, identical): %v", err)
 	}
 
-	terms, err := s.Taxonomy.ListTerms(ctx, "muscle_group", "en")
+	terms, err := s.Taxonomy.ListTerms(ctx, "muscle_group", "en", 1000, 0)
 	if err != nil {
 		t.Fatalf("ListTerms: %v", err)
 	}

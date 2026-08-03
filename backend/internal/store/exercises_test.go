@@ -283,7 +283,7 @@ func TestExerciseStore_ListRevisions(t *testing.T) {
 		t.Fatalf("repoint current_revision_id: %v", err)
 	}
 
-	revisions, err := s.Exercises.ListRevisions(ctx, exerciseID)
+	revisions, err := s.Exercises.ListRevisions(ctx, exerciseID, 1000, 0)
 	if err != nil {
 		t.Fatalf("ListRevisions(%s): unexpected error: %v", exerciseID, err)
 	}
@@ -310,7 +310,7 @@ func TestExerciseStore_ListRevisions_NoRevisions(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 
-	revisions, err := s.Exercises.ListRevisions(ctx, "00000000-0000-0000-0000-000000000000")
+	revisions, err := s.Exercises.ListRevisions(ctx, "00000000-0000-0000-0000-000000000000", 1000, 0)
 	if err != nil {
 		t.Fatalf("ListRevisions(nonexistent): unexpected error: %v", err)
 	}

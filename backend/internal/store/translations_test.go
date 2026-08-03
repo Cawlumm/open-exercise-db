@@ -152,7 +152,7 @@ func TestTranslationStore_ListLocalesForExercise(t *testing.T) {
 	oldRevisionID := seedRevision(t, ctx, pool, exerciseID, "Barbell Row (old)", time.Now().Add(-time.Hour), "superseded")
 	seedTranslation(t, ctx, pool, oldRevisionID, "de", "Altes Rudern", nil, nil, "human")
 
-	summaries, err := s.Translations.ListLocalesForExercise(ctx, exerciseID)
+	summaries, err := s.Translations.ListLocalesForExercise(ctx, exerciseID, 1000, 0)
 	if err != nil {
 		t.Fatalf("ListLocalesForExercise: unexpected error: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestTranslationStore_ListLocalesForExercise_NoTranslations(t *testing.T) {
 		muscleGroup: "core", equipment: "bodyweight", category: "strength",
 	})
 
-	summaries, err := s.Translations.ListLocalesForExercise(ctx, exerciseID)
+	summaries, err := s.Translations.ListLocalesForExercise(ctx, exerciseID, 1000, 0)
 	if err != nil {
 		t.Fatalf("ListLocalesForExercise: unexpected error: %v", err)
 	}

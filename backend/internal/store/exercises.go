@@ -194,17 +194,43 @@ const revisionColumns = `
 	mechanic, force, level, instructions, image_ids, video_ids, license, attribution_text,
 	source_url, submitted_by, reviewed_by, change_summary, status, created_at`
 
-// ListRevisions returns every revision of exerciseID, newest first.
+// CountRevisions returns how many revisions exerciseID has, ignoring
+// pagination — the Total a paginated ListRevisions response reports.
+func (s *ExerciseStore) CountRevisions(ctx context.Context, exerciseID string) (int, error) {
+	var total int
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM exercise_revisions WHERE exercise_id = $1`, exerciseID).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("count revisions for exercise %s: %w", exerciseID, err)
+	}
+	return total, nil
+}
+
+// ListRevisions returns one page of exerciseID's revisions, newest first.
 // Revision history is append-only and never deleted, so this includes
 // superseded revisions as well as the current one.
-func (s *ExerciseStore) ListRevisions(ctx context.Context, exerciseID string) ([]model.Revision, error) {
+//
+// Paginated at the SQL layer rather than sliced in the handler because this
+// is the one collection in the API with genuinely unbounded growth: every
+// approved edit appends a row that is never removed, so a heavily-edited
+// exercise's history grows without limit for as long as the project runs.
+// Slicing after the fact would still load the whole history into memory on
+// every request to page 1.
+//
+// Ordered by created_at DESC with id as a tiebreak: two revisions written in
+// the same transaction can share a created_at, and without a deterministic
+// second key Postgres is free to order them differently between the query for
+// page 1 and the query for page 2, silently dropping or duplicating a row
+// across the page boundary.
+func (s *ExerciseStore) ListRevisions(ctx context.Context, exerciseID string, limit, offset int) ([]model.Revision, error) {
 	query := fmt.Sprintf(`
 		SELECT %s
 		FROM exercise_revisions
 		WHERE exercise_id = $1
-		ORDER BY created_at DESC`, revisionColumns)
+		ORDER BY created_at DESC, id DESC
+		LIMIT $2 OFFSET $3`, revisionColumns)
 
-	rows, err := s.pool.Query(ctx, query, exerciseID)
+	rows, err := s.pool.Query(ctx, query, exerciseID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list revisions for exercise %s: %w", exerciseID, err)
 	}

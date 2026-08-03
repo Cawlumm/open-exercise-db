@@ -96,14 +96,35 @@ func (s *TranslationStore) GetForRevision(ctx context.Context, revisionID, local
 // the translation row itself supplies a non-empty name and a non-empty
 // instructions array; it does not consider English fallback, since
 // completeness is about how much of that locale's own translation exists.
-func (s *TranslationStore) ListLocalesForExercise(ctx context.Context, exerciseID string) ([]model.TranslationSummary, error) {
+// CountLocalesForExercise returns how many locales have an approved
+// translation of exerciseID's current revision, ignoring pagination. The
+// WHERE clause is kept identical to ListLocalesForExercise's below; if the
+// two ever diverge the reported Total stops describing the page it is
+// attached to.
+func (s *TranslationStore) CountLocalesForExercise(ctx context.Context, exerciseID string) (int, error) {
+	var total int
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM exercise_translations t
+		JOIN exercises e ON e.current_revision_id = t.revision_id
+		WHERE e.id = $1 AND t.status = 'approved'`, exerciseID).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("count translation locales for exercise %s: %w", exerciseID, err)
+	}
+	return total, nil
+}
+
+func (s *TranslationStore) ListLocalesForExercise(ctx context.Context, exerciseID string, limit, offset int) ([]model.TranslationSummary, error) {
+	// t.locale is unique per revision, so ORDER BY locale is deterministic
+	// across pages without a tiebreak column.
 	rows, err := s.pool.Query(ctx, `
 		SELECT t.locale, t.origin, t.revision_id,
 		       (t.name <> '' AND jsonb_array_length(t.instructions) > 0) AS complete
 		FROM exercise_translations t
 		JOIN exercises e ON e.current_revision_id = t.revision_id
 		WHERE e.id = $1 AND t.status = 'approved'
-		ORDER BY t.locale ASC`, exerciseID)
+		ORDER BY t.locale ASC
+		LIMIT $2 OFFSET $3`, exerciseID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list translation locales for exercise %s: %w", exerciseID, err)
 	}

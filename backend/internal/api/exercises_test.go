@@ -105,7 +105,7 @@ func TestListExercises_FilterAndPaginationPassthrough(t *testing.T) {
 	})
 
 	t.Run("page/per_page pass through to the store unchanged", func(t *testing.T) {
-		out, err := ListExercises(ctx, s, "", &ListExercisesInput{Page: 1, PerPage: 2})
+		out, err := ListExercises(ctx, s, "", &ListExercisesInput{PageParams: PageParams{Page: 1, PerPage: 2}})
 		if err != nil {
 			t.Fatalf("ListExercises: unexpected error: %v", err)
 		}
@@ -119,7 +119,7 @@ func TestListExercises_FilterAndPaginationPassthrough(t *testing.T) {
 			t.Errorf("Page/PerPage = %d/%d, want 1/2", out.Body.Page, out.Body.PerPage)
 		}
 
-		out2, err := ListExercises(ctx, s, "", &ListExercisesInput{Page: 2, PerPage: 2})
+		out2, err := ListExercises(ctx, s, "", &ListExercisesInput{PageParams: PageParams{Page: 2, PerPage: 2}})
 		if err != nil {
 			t.Fatalf("ListExercises page 2: unexpected error: %v", err)
 		}

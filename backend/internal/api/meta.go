@@ -33,6 +33,7 @@ type Locale struct {
 type ListTaxonomyTermsInput struct {
 	conditional.Params
 	Locale string `query:"locale" doc:"BCP-47 locale for the label; falls back to English, then the slug itself"`
+	PageParams
 }
 
 type ListTaxonomyTermsOutput struct {
@@ -40,11 +41,13 @@ type ListTaxonomyTermsOutput struct {
 	ETag         string `header:"ETag"`
 	Body         struct {
 		Terms []TaxonomyTerm `json:"terms"`
+		Pagination
 	}
 }
 
 type ListLocalesInput struct {
 	conditional.Params
+	PageParams
 }
 
 type ListLocalesOutput struct {
@@ -52,6 +55,7 @@ type ListLocalesOutput struct {
 	ETag         string `header:"ETag"`
 	Body         struct {
 		Locales []Locale `json:"locales" doc:"Every locale with translated content in the dataset; always includes en"`
+		Pagination
 	}
 }
 
@@ -121,12 +125,19 @@ func registerMetaRoutes(hapi huma.API, s *store.Store) {
 // taxonomy facet they query. Exported so handler tests can call it directly
 // with an input struct (docs/CONVENTIONS.md section 3/6).
 func ListTaxonomyTerms(ctx context.Context, s *store.Store, facet string, input *ListTaxonomyTermsInput) (*ListTaxonomyTermsOutput, error) {
-	terms, err := s.Taxonomy.ListTerms(ctx, facet, input.Locale)
+	total, err := s.Taxonomy.CountTerms(ctx, facet)
+	if err != nil {
+		return nil, mapStoreError(err, "")
+	}
+
+	_, perPage := input.Normalize()
+	terms, err := s.Taxonomy.ListTerms(ctx, facet, input.Locale, perPage, input.Offset())
 	if err != nil {
 		return nil, mapStoreError(err, "")
 	}
 
 	out := &ListTaxonomyTermsOutput{}
+	out.Body.Pagination = paginationFor(input.PageParams, total)
 	// Empty slice, not nil — see ListExercises (exercises.go). Masked today
 	// because every facet is seeded non-empty, which is exactly why it's
 	// worth fixing now rather than when a new facet ships empty.
@@ -145,12 +156,19 @@ func ListTaxonomyTerms(ctx context.Context, s *store.Store, facet string, input 
 }
 
 func ListLocales(ctx context.Context, s *store.Store, input *ListLocalesInput) (*ListLocalesOutput, error) {
-	locales, err := s.Taxonomy.ListLocales(ctx)
+	total, err := s.Taxonomy.CountLocales(ctx)
+	if err != nil {
+		return nil, mapStoreError(err, "")
+	}
+
+	_, perPage := input.Normalize()
+	locales, err := s.Taxonomy.ListLocales(ctx, perPage, input.Offset())
 	if err != nil {
 		return nil, mapStoreError(err, "")
 	}
 
 	out := &ListLocalesOutput{}
+	out.Body.Pagination = paginationFor(input.PageParams, total)
 	// Empty slice, not nil — see ListExercises (exercises.go).
 	out.Body.Locales = make([]Locale, 0, len(locales))
 	for _, l := range locales {
