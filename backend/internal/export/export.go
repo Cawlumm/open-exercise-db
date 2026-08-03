@@ -153,6 +153,12 @@ func buildBlob(ctx context.Context, s *store.Store, imageBaseURL string) (*Blob,
 	}
 
 	body := Body{GeneratedAt: time.Now().UTC()}
+	// Empty slice, not nil, so an export of an empty database serializes as
+	// `"exercises": []` rather than `null` — see internal/api's ListExercises
+	// for the reasoning. It matters more here than anywhere else: the export
+	// is the artifact consumers mirror on a schedule and parse offline, so a
+	// null would break a pipeline nowhere near this code.
+	body.Exercises = make([]contract.Exercise, 0, len(exercises))
 	for _, ex := range exercises {
 		assembled, err := assembleExercise(ctx, s, ex, imageBaseURL)
 		if err != nil {

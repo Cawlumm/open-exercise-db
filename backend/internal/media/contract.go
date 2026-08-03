@@ -47,9 +47,12 @@ func ImageURL(baseURL, id, storageKey string) string {
 // image_ids[] array) — this is the only place that ordering is used, so it's
 // worth calling out rather than assuming.
 func BuildImages(imgs []model.Image, baseURL string) []contract.Image {
-	if len(imgs) == 0 {
-		return nil
-	}
+	// No early nil return for the empty case: encoding/json renders a nil
+	// slice as `null` and an empty one as `[]`, and Exercise.Images is a list
+	// every consumer will iterate. Every exercise in the bootstrap dataset
+	// carries two images, so `"images": null` would have stayed invisible
+	// until the first image-less contributor submission in Phase 2 —
+	// surfacing as a client-side crash on the one record nobody tested.
 	out := make([]contract.Image, 0, len(imgs))
 	for _, img := range imgs {
 		out = append(out, contract.Image{

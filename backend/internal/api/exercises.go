@@ -227,6 +227,15 @@ func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, inp
 	}
 
 	out := newListExercisesEnvelope(input, total)
+	// Pre-allocated rather than appended onto a nil slice so a zero-result
+	// response serializes as `"exercises": []`, not `"exercises": null`.
+	// encoding/json renders a nil slice as null, and null here breaks the
+	// consumption model docs/DESIGN.md recommends as primary: a type-ahead
+	// search sends a request per debounce interval, so the *first* query
+	// matching nothing hands every client a null where it expects a list.
+	// Same reasoning applies to every list-shaped response body in this
+	// package.
+	out.Body.Exercises = make([]contract.Exercise, 0, len(exercises))
 	for _, ex := range exercises {
 		resolved, err := resolveExercise(ctx, s, ex, input.Locale, imageBaseURL)
 		if err != nil {
@@ -300,6 +309,8 @@ func ListExerciseRevisions(ctx context.Context, s *store.Store, input *ListExerc
 	}
 
 	out := &ListExerciseRevisionsOutput{}
+	// Empty slice, not nil — see ListExercises for why.
+	out.Body.Revisions = make([]Revision, 0, len(revisions))
 	for _, rev := range revisions {
 		out.Body.Revisions = append(out.Body.Revisions, revisionFromModel(rev))
 	}
@@ -328,6 +339,11 @@ func ListExerciseTranslations(ctx context.Context, s *store.Store, input *ListEx
 	}
 
 	out := &ListExerciseTranslationsOutput{}
+	// Empty slice, not nil — see ListExercises. This endpoint hits the case
+	// most often: an exercise with no translations beyond its revision's own
+	// content is the norm today, so `null` here was the shipped behavior for
+	// every exercise in the dataset.
+	out.Body.Locales = make([]TranslationSummary, 0, len(summaries))
 	for _, sum := range summaries {
 		out.Body.Locales = append(out.Body.Locales, TranslationSummary{
 			Locale:     sum.Locale,
