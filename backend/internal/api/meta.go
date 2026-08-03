@@ -79,6 +79,19 @@ func registerMetaRoutes(hapi huma.API, s *store.Store) {
 		Tags:        []string{"meta"},
 		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierRead},
 		Errors:      []int{http.StatusTooManyRequests},
+		// Unknown query parameters are rejected on this operation rather than
+		// server-wide. The flag is per-operation precisely because the two
+		// endpoints without query parameters — get-image and export-exercises —
+		// must not have it: an unknown parameter there cannot be a typo of a
+		// real one, and the realistic sender is a cache-buster
+		// (`<img src=".../images/{id}?v=2">`), a `?utm_source=` that rode in on
+		// a link, or a mirroring job stamping `?ts=`. Rejecting those breaks the
+		// image or the sync and teaches the caller nothing.
+		//
+		// Not SkipValidateParams on those two instead: that switch disables
+		// *all* parameter validation including the path UUID, which turned a
+		// malformed image id from a 422 into a 500.
+		RejectUnknownQueryParameters: true,
 	}, func(ctx context.Context, input *ListTaxonomyTermsInput) (*ListTaxonomyTermsOutput, error) {
 		return ListTaxonomyTerms(ctx, s, facetMuscleGroup, input)
 	})
@@ -91,6 +104,19 @@ func registerMetaRoutes(hapi huma.API, s *store.Store) {
 		Tags:        []string{"meta"},
 		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierRead},
 		Errors:      []int{http.StatusTooManyRequests},
+		// Unknown query parameters are rejected on this operation rather than
+		// server-wide. The flag is per-operation precisely because the two
+		// endpoints without query parameters — get-image and export-exercises —
+		// must not have it: an unknown parameter there cannot be a typo of a
+		// real one, and the realistic sender is a cache-buster
+		// (`<img src=".../images/{id}?v=2">`), a `?utm_source=` that rode in on
+		// a link, or a mirroring job stamping `?ts=`. Rejecting those breaks the
+		// image or the sync and teaches the caller nothing.
+		//
+		// Not SkipValidateParams on those two instead: that switch disables
+		// *all* parameter validation including the path UUID, which turned a
+		// malformed image id from a 422 into a 500.
+		RejectUnknownQueryParameters: true,
 	}, func(ctx context.Context, input *ListTaxonomyTermsInput) (*ListTaxonomyTermsOutput, error) {
 		return ListTaxonomyTerms(ctx, s, facetEquipment, input)
 	})
@@ -103,6 +129,19 @@ func registerMetaRoutes(hapi huma.API, s *store.Store) {
 		Tags:        []string{"meta"},
 		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierRead},
 		Errors:      []int{http.StatusTooManyRequests},
+		// Unknown query parameters are rejected on this operation rather than
+		// server-wide. The flag is per-operation precisely because the two
+		// endpoints without query parameters — get-image and export-exercises —
+		// must not have it: an unknown parameter there cannot be a typo of a
+		// real one, and the realistic sender is a cache-buster
+		// (`<img src=".../images/{id}?v=2">`), a `?utm_source=` that rode in on
+		// a link, or a mirroring job stamping `?ts=`. Rejecting those breaks the
+		// image or the sync and teaches the caller nothing.
+		//
+		// Not SkipValidateParams on those two instead: that switch disables
+		// *all* parameter validation including the path UUID, which turned a
+		// malformed image id from a 422 into a 500.
+		RejectUnknownQueryParameters: true,
 	}, func(ctx context.Context, input *ListTaxonomyTermsInput) (*ListTaxonomyTermsOutput, error) {
 		return ListTaxonomyTerms(ctx, s, facetCategory, input)
 	})
@@ -115,6 +154,19 @@ func registerMetaRoutes(hapi huma.API, s *store.Store) {
 		Tags:        []string{"meta"},
 		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierRead},
 		Errors:      []int{http.StatusTooManyRequests},
+		// Unknown query parameters are rejected on this operation rather than
+		// server-wide. The flag is per-operation precisely because the two
+		// endpoints without query parameters — get-image and export-exercises —
+		// must not have it: an unknown parameter there cannot be a typo of a
+		// real one, and the realistic sender is a cache-buster
+		// (`<img src=".../images/{id}?v=2">`), a `?utm_source=` that rode in on
+		// a link, or a mirroring job stamping `?ts=`. Rejecting those breaks the
+		// image or the sync and teaches the caller nothing.
+		//
+		// Not SkipValidateParams on those two instead: that switch disables
+		// *all* parameter validation including the path UUID, which turned a
+		// malformed image id from a 422 into a 500.
+		RejectUnknownQueryParameters: true,
 	}, func(ctx context.Context, input *ListLocalesInput) (*ListLocalesOutput, error) {
 		return ListLocales(ctx, s, input)
 	})

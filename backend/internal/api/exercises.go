@@ -79,7 +79,17 @@ type TranslationSummary struct {
 // checkNotModified in api.go for how the response side uses it.
 type ListExercisesInput struct {
 	conditional.Params
-	Q string `query:"q" doc:"Case-insensitive search over exercise name and aliases. Every whitespace-separated word must appear, in any order, so adding a word narrows the results."`
+	// maxLength is load-bearing, not cosmetic. Tokenized search emits one bind
+	// parameter and one ILIKE plus a correlated unnest subquery per word, so an
+	// uncapped q is a cost amplifier a stranger controls: ~70,000 words fits in
+	// a URL Go accepts by default and exceeds Postgres' 65,535-parameter limit
+	// outright (a 500 for malformed input), while a few thousand — comfortably
+	// inside any CDN's URL cap — is seconds of database CPU per request on the
+	// most permissive rate-limit tier. Before tokenizing, any q was exactly one
+	// parameter and one predicate, so this ceiling is what keeps the new
+	// behaviour as cheap as the old one. store.maxSearchTerms enforces the same
+	// bound again for direct handler calls, which never see this tag.
+	Q string `query:"q" maxLength:"200" doc:"Case-insensitive search over exercise name and aliases. Every whitespace-separated word must appear, in any order, so adding a word narrows the results. Maximum 200 characters."`
 	// Every response carries a slug, so a consumer that stored one had no way
 	// to look it back up: the path takes a UUID and there was no slug filter,
 	// leaving only a substring search that could match several rows or none.
@@ -182,6 +192,19 @@ func registerExerciseRoutes(hapi huma.API, s *store.Store, imageBaseURL string) 
 		// cached row.
 		Metadata: map[string]any{rateLimitTierKey: ratelimit.TierSearch},
 		Errors:   []int{http.StatusTooManyRequests},
+		// Unknown query parameters are rejected on this operation rather than
+		// server-wide. The flag is per-operation precisely because the two
+		// endpoints without query parameters — get-image and export-exercises —
+		// must not have it: an unknown parameter there cannot be a typo of a
+		// real one, and the realistic sender is a cache-buster
+		// (`<img src=".../images/{id}?v=2">`), a `?utm_source=` that rode in on
+		// a link, or a mirroring job stamping `?ts=`. Rejecting those breaks the
+		// image or the sync and teaches the caller nothing.
+		//
+		// Not SkipValidateParams on those two instead: that switch disables
+		// *all* parameter validation including the path UUID, which turned a
+		// malformed image id from a 422 into a 500.
+		RejectUnknownQueryParameters: true,
 	}, func(ctx context.Context, input *ListExercisesInput) (*ListExercisesOutput, error) {
 		return ListExercises(ctx, s, imageBaseURL, input)
 	})
@@ -194,6 +217,19 @@ func registerExerciseRoutes(hapi huma.API, s *store.Store, imageBaseURL string) 
 		Tags:        []string{"exercises"},
 		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierRead},
 		Errors:      []int{http.StatusNotFound, http.StatusTooManyRequests},
+		// Unknown query parameters are rejected on this operation rather than
+		// server-wide. The flag is per-operation precisely because the two
+		// endpoints without query parameters — get-image and export-exercises —
+		// must not have it: an unknown parameter there cannot be a typo of a
+		// real one, and the realistic sender is a cache-buster
+		// (`<img src=".../images/{id}?v=2">`), a `?utm_source=` that rode in on
+		// a link, or a mirroring job stamping `?ts=`. Rejecting those breaks the
+		// image or the sync and teaches the caller nothing.
+		//
+		// Not SkipValidateParams on those two instead: that switch disables
+		// *all* parameter validation including the path UUID, which turned a
+		// malformed image id from a 422 into a 500.
+		RejectUnknownQueryParameters: true,
 	}, func(ctx context.Context, input *GetExerciseInput) (*GetExerciseOutput, error) {
 		return GetExercise(ctx, s, imageBaseURL, input)
 	})
@@ -206,6 +242,19 @@ func registerExerciseRoutes(hapi huma.API, s *store.Store, imageBaseURL string) 
 		Tags:        []string{"exercises"},
 		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierRead},
 		Errors:      []int{http.StatusNotFound, http.StatusTooManyRequests},
+		// Unknown query parameters are rejected on this operation rather than
+		// server-wide. The flag is per-operation precisely because the two
+		// endpoints without query parameters — get-image and export-exercises —
+		// must not have it: an unknown parameter there cannot be a typo of a
+		// real one, and the realistic sender is a cache-buster
+		// (`<img src=".../images/{id}?v=2">`), a `?utm_source=` that rode in on
+		// a link, or a mirroring job stamping `?ts=`. Rejecting those breaks the
+		// image or the sync and teaches the caller nothing.
+		//
+		// Not SkipValidateParams on those two instead: that switch disables
+		// *all* parameter validation including the path UUID, which turned a
+		// malformed image id from a 422 into a 500.
+		RejectUnknownQueryParameters: true,
 	}, func(ctx context.Context, input *ListExerciseRevisionsInput) (*ListExerciseRevisionsOutput, error) {
 		return ListExerciseRevisions(ctx, s, input)
 	})
@@ -218,6 +267,19 @@ func registerExerciseRoutes(hapi huma.API, s *store.Store, imageBaseURL string) 
 		Tags:        []string{"exercises"},
 		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierRead},
 		Errors:      []int{http.StatusNotFound, http.StatusTooManyRequests},
+		// Unknown query parameters are rejected on this operation rather than
+		// server-wide. The flag is per-operation precisely because the two
+		// endpoints without query parameters — get-image and export-exercises —
+		// must not have it: an unknown parameter there cannot be a typo of a
+		// real one, and the realistic sender is a cache-buster
+		// (`<img src=".../images/{id}?v=2">`), a `?utm_source=` that rode in on
+		// a link, or a mirroring job stamping `?ts=`. Rejecting those breaks the
+		// image or the sync and teaches the caller nothing.
+		//
+		// Not SkipValidateParams on those two instead: that switch disables
+		// *all* parameter validation including the path UUID, which turned a
+		// malformed image id from a 422 into a 500.
+		RejectUnknownQueryParameters: true,
 	}, func(ctx context.Context, input *ListExerciseTranslationsInput) (*ListExerciseTranslationsOutput, error) {
 		return ListExerciseTranslations(ctx, s, input)
 	})

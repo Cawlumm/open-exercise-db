@@ -98,7 +98,14 @@ func IndexHandler(apiVersion string) http.Handler {
 		w.Header().Set("Cache-Control", cacheControl)
 		w.Header().Set("ETag", tag)
 
-		if match := r.Header.Get("If-None-Match"); match != "" && match == tag {
+		// Compared through the shared matcher rather than by string equality.
+		// A raw `match == tag` misses every legal spelling a real revalidator
+		// sends — a weak tag (W/"…"), a comma-separated list of candidates, the
+		// `*` wildcard, and the leading-whitespace-in-list case api.go's
+		// trimListOWS exists specifically to work around — so this handler
+		// would have been the one endpoint reintroducing a bug the rest of the
+		// API already fixed, answering 200 to every revalidation.
+		if etagMatches(r.Header.Values("If-None-Match"), tag) {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}

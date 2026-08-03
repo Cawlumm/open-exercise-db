@@ -105,15 +105,22 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
-	// Discovery. "/{$}" is an exact match on "/" — deliberately not the bare
-	// "/" pattern, which is a prefix wildcard matching every path and would
-	// make ServeMux stop returning 405 (see internal/api/errors.go). The three
-	// URLs a newcomer tries first all 404'd before this; now the bare host
-	// describes the API. /api/v1 gets the same document so the version prefix
-	// someone copies out of a URL is also a live entry point.
+	// Each entry URL is registered explicitly, with and without its trailing
+	// slash. "/api/v1/{$}" alone matches only "/api/v1/", so "/api/v1" — the
+	// form someone actually copies out of a URL — got ServeMux's implicit 307
+	// and an HTML redirect stub instead of the document, and "/api" was never
+	// registered at all. Verified against this Go version that all five
+	// patterns coexist without conflicting and that 405 and 404 still behave.
 	indexHandler := api.IndexHandler(apiVersion)
-	mux.Handle("GET /{$}", indexHandler)
-	mux.Handle("GET /api/v1/{$}", indexHandler)
+	for _, pattern := range []string{
+		"GET /{$}",
+		"GET /api",
+		"GET /api/{$}",
+		"GET /api/v1",
+		"GET /api/v1/{$}",
+	} {
+		mux.Handle(pattern, indexHandler)
+	}
 
 	// OpenAPIPath carries the full /api/v1 prefix directly (rather than
 	// humago.NewWithPrefix) so the spec and docs UI land exactly where
@@ -125,15 +132,6 @@ func main() {
 	humaConfig := huma.DefaultConfig("open-exercise-db API", apiVersion)
 	humaConfig.OpenAPIPath = "/api/v1/openapi"
 	humaConfig.DocsPath = "/docs"
-	// An unrecognized query parameter is a client bug, and silently ignoring
-	// one produces the worst possible response: a 200 carrying a confidently
-	// wrong answer. `?search=bench` (the obvious guess for `q`), `?limit=5`
-	// (the obvious guess for `per_page`), and `?muscleGroup=chest` (camelCase
-	// instead of snake_case) each returned all 873 exercises, and nothing in
-	// the response told the caller their filter had been dropped — the failure
-	// only shows up later as "the API ignores my search". Rejecting instead
-	// turns each of those into a 422 naming the offending parameter.
-	humaConfig.RejectUnknownQueryParameters = true
 	humaConfig.Info.License = &huma.License{Name: "MIT", Identifier: "MIT"} // docs/DESIGN.md -> Licensing: code is MIT (data is CC0, tracked separately)
 	// Servers is informational for spec consumers/linters (redocly's
 	// no-empty-servers rule flags its absence); operation paths already

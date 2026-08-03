@@ -51,10 +51,15 @@ const cacheControl = "public, max-age=300, stale-while-revalidate=86400"
 // and User-Agent policy apply uniformly to every GET this package exposes,
 // not opted into per-route.
 func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter *ratelimit.Limiter, mediaStore media.Store, imageBaseURL string) {
-	// Ahead of the rate limiter: a malformed request should be cheap to reject
-	// and should not consume a caller's budget for the round trip.
-	hapi.UseMiddleware(rejectNulBytesMiddleware(hapi))
+	// Rate limiting first. Putting the NUL check ahead of it looked like a
+	// courtesy — reject malformed input without spending the caller's budget —
+	// but it created an unmetered request path: a client looping on
+	// NUL-containing query strings was rejected before the limiter ever saw it,
+	// so the requests were free. It also stripped the RateLimit-* headers from
+	// that one error response, making it the only 4xx a well-behaved consumer
+	// could not read its remaining budget from.
 	hapi.UseMiddleware(rateLimitMiddleware(hapi, limiter))
+	hapi.UseMiddleware(rejectNulBytesMiddleware(hapi))
 
 	// registerExportRoutes intentionally comes before registerExerciseRoutes.
 	// GET /api/v1/exercises/export (a static, literal path) and GET
@@ -210,6 +215,37 @@ func checkNotModified(p *conditional.Params, tag, cc string) error {
 		"Cache-Control": {cc},
 		"ETag":          {etagHeader(tag)},
 	})
+}
+
+// etagMatches reports whether any entity-tag in an If-None-Match header value
+// matches tag, which is quoted as it appears on the wire.
+//
+// Exists for handlers that sit outside huma and so cannot use
+// checkNotModified — IndexHandler is the only one today. It implements the
+// same RFC 9110 §13.1.2 rules that package handles for free: the `*` wildcard,
+// comma-separated candidate lists, optional whitespace around the commas, and
+// weak comparison (a `W/` prefix is stripped rather than treated as a
+// mismatch, which is correct here because these are content hashes of
+// read-only representations, not byte-for-byte write preconditions).
+//
+// Takes the header's values as a slice so a request carrying If-None-Match
+// more than once — legal, and what some proxies emit instead of one joined
+// list — is handled the same as a single combined header.
+func etagMatches(headerValues []string, tag string) bool {
+	bare := strings.Trim(tag, `"`)
+
+	for _, value := range headerValues {
+		for _, candidate := range trimListOWS(strings.Split(value, ",")) {
+			if candidate == "*" {
+				return true
+			}
+			candidate = strings.TrimPrefix(candidate, "W/")
+			if strings.Trim(candidate, `"`) == bare {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // trimListOWS strips RFC 9110 optional whitespace (spaces and tabs) from

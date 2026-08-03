@@ -302,7 +302,7 @@ func buildExerciseWhere(filter ExerciseFilter) (string, []any) {
 	// AND across terms rather than OR: adding a word should narrow a search,
 	// which is the universal convention and the only one that makes a
 	// type-ahead usable as the user keeps typing.
-	for _, term := range strings.Fields(filter.Q) {
+	for _, term := range searchTerms(filter.Q) {
 		// The term is escaped before being wrapped in wildcards, and the
 		// pattern declares its escape character explicitly. Without this, LIKE
 		// metacharacters in user input were live: `?q=%` built `%%%`, which
@@ -357,17 +357,52 @@ func exerciseOrderBy(q string, listArgs []any) (string, []any) {
 		return "r.name ASC, e.id ASC", listArgs
 	}
 
-	listArgs = append(listArgs, q)
-	n := len(listArgs)
+	// Two parameters, not one: the exact-match arm compares the query
+	// literally, while the prefix arm uses it as a LIKE pattern and therefore
+	// needs the same escaping the WHERE clause applies. Interpolating the raw
+	// query into the prefix pattern left this half-fixed — `q=100%` produced
+	// the pattern `100%%`, ranking every name starting with "100" as a prefix
+	// match regardless of what followed, and `q=a_b` matching any character in
+	// that position. It changed ordering rather than membership, which is
+	// exactly why it would have gone unnoticed.
+	listArgs = append(listArgs, q, escapeLikePattern(q))
+	exact, prefix := len(listArgs)-1, len(listArgs)
 	return fmt.Sprintf(`
 		CASE
 			WHEN lower(r.name) = lower($%d) THEN 0
-			WHEN lower(r.name) LIKE lower($%d) || '%%' THEN 1
+			WHEN lower(r.name) LIKE lower($%d) || '%%' ESCAPE '\' THEN 1
 			ELSE 2
 		END ASC,
 		length(r.name) ASC,
 		r.name ASC,
-		e.id ASC`, n, n), listArgs
+		e.id ASC`, exact, prefix), listArgs
+}
+
+// maxSearchTerms bounds how many words one query may be split into.
+//
+// Each term costs a bind parameter, an ILIKE, and a correlated unnest subquery
+// evaluated over every published row, so the term count is a cost multiplier an
+// unauthenticated caller chooses. internal/api caps the raw string length via a
+// maxLength tag, which is the primary defence; this is the same bound expressed
+// where the cost is actually incurred, so a direct handler call — the
+// invocation path docs/CONVENTIONS.md mandates for tests, which never sees
+// huma's tag validation — cannot issue a query the HTTP path would refuse.
+//
+// Excess terms are dropped rather than erroring: this is a backstop behind a
+// validation layer that already rejects the request, so it can only be reached
+// by a caller inside this process, and silently narrowing to the first 16 words
+// is a saner outcome there than a panic or an error type every caller must now
+// handle.
+const maxSearchTerms = 16
+
+// searchTerms splits a query into the words that must each match, bounded by
+// maxSearchTerms.
+func searchTerms(q string) []string {
+	terms := strings.Fields(q)
+	if len(terms) > maxSearchTerms {
+		terms = terms[:maxSearchTerms]
+	}
+	return terms
 }
 
 // escapeLikePattern neutralizes the three characters LIKE treats specially, so

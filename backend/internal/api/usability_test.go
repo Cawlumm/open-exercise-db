@@ -666,3 +666,139 @@ func TestIndexHandler_IsCacheable(t *testing.T) {
 		t.Errorf("If-None-Match with the current tag = %d, want 304", rec3.Code)
 	}
 }
+
+// The tests below pin fixes for defects found by code review of the usability
+// work itself — several of them regressions the usability changes introduced.
+
+// TestSearchTermCountIsBounded guards a cost amplifier the tokenized search
+// created. Each word costs a bind parameter and a correlated subquery over
+// every published row, so an uncapped q let a stranger choose how expensive a
+// request was: enough words exceeded Postgres' 65,535-parameter limit outright
+// (a 500 for malformed input), and merely thousands meant seconds of database
+// CPU on the most permissive rate-limit tier.
+func TestSearchTermCountIsBounded(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+
+	seedExercise(t, ctx, pool, exerciseFixture{
+		slug: "bounded-press", name: "Bounded Press",
+		muscleGroup: "chest", equipment: "barbell", category: "strength",
+	})
+
+	// Far more terms than the cap. A direct handler call bypasses huma's
+	// maxLength tag entirely, which is exactly the path this bound exists for.
+	many := strings.Repeat("bounded ", 5000)
+	if _, err := ListExercises(ctx, s, "", &ListExercisesInput{Q: many}); err != nil {
+		t.Fatalf("a very long q must be bounded, not fail: %v", err)
+	}
+}
+
+func TestSearchTerms_Truncates(t *testing.T) {
+	if got := len(store.StoreSearchTerms(strings.Repeat("a ", 1000))); got > 16 {
+		t.Errorf("searchTerms returned %d terms, want at most 16", got)
+	}
+	// Ordinary queries are untouched.
+	if got := store.StoreSearchTerms("bench press"); len(got) != 2 {
+		t.Errorf("searchTerms(\"bench press\") = %v, want 2 terms", got)
+	}
+}
+
+// TestETagMatches covers the conditional-GET rules IndexHandler previously got
+// wrong by comparing strings directly: every legal spelling a real revalidator
+// sends would have produced a 200 instead of a 304.
+func TestETagMatches(t *testing.T) {
+	const tag = `"abc123"`
+
+	cases := []struct {
+		header []string
+		want   bool
+		why    string
+	}{
+		{[]string{`"abc123"`}, true, "exact"},
+		{[]string{`W/"abc123"`}, true, "weak comparison"},
+		{[]string{`"other", "abc123"`}, true, "list, second entry"},
+		{[]string{`"other","abc123"`}, true, "list without whitespace"},
+		{[]string{`"other",  W/"abc123"`}, true, "list with OWS and a weak tag"},
+		{[]string{"*"}, true, "wildcard"},
+		{[]string{`"other"`, `"abc123"`}, true, "header repeated rather than joined"},
+		{[]string{`"nomatch"`}, false, "different tag"},
+		{[]string{""}, false, "empty"},
+		{nil, false, "absent"},
+	}
+
+	for _, c := range cases {
+		if got := etagMatches(c.header, tag); got != c.want {
+			t.Errorf("etagMatches(%q, %s) = %v, want %v (%s)", c.header, tag, got, c.want, c.why)
+		}
+	}
+}
+
+func TestIsZeroQValue(t *testing.T) {
+	// "gzip;q=0" was the only spelling treated as a refusal, but RFC 9110
+	// §12.4.2 allows up to three fractional digits — so a client saying
+	// q=0.0 was sent an encoding it had explicitly declined.
+	cases := map[string]bool{
+		"q=0":     true,
+		"q=0.0":   true,
+		"q=0.00":  true,
+		"q=0.000": true,
+		" q=0 ":   true,
+		"Q=0":     true,
+		"q=0.5":   false,
+		"q=1":     false,
+		"q=1.0":   false,
+		"":        false,
+		"q=":      false,
+		"q=abc":   false,
+		"level=1": false,
+	}
+	for params, want := range cases {
+		if got := isZeroQValue(params); got != want {
+			t.Errorf("isZeroQValue(%q) = %v, want %v", params, got, want)
+		}
+	}
+}
+
+func TestCompress_WeakensETag(t *testing.T) {
+	// The gzipped and identity bodies differ byte-for-byte, so RFC 9110 §8.8.3
+	// forbids them sharing a strong validator. Vary already makes a conforming
+	// cache key them apart; this is the guard against one that keys on ETag
+	// alone and hands a gzipped body to a client that asked for identity.
+	h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("ETag", `"abc123"`)
+		_, _ = w.Write([]byte(`{"v":"` + strings.Repeat("a", 40_000) + `"}`))
+	})
+
+	rec := httptest.NewRecorder()
+	Compress(h).ServeHTTP(rec, gzipRequest())
+	if got := rec.Header().Get("ETag"); got != `W/"abc123"` {
+		t.Errorf("compressed ETag = %q, want a weak tag", got)
+	}
+
+	// Identity keeps the strong tag: nothing about that representation changed.
+	plain := httptest.NewRecorder()
+	Compress(h).ServeHTTP(plain, httptest.NewRequest(http.MethodGet, "/api/v1/exercises", nil))
+	if got := plain.Header().Get("ETag"); got != `"abc123"` {
+		t.Errorf("identity ETag = %q, want the original strong tag", got)
+	}
+}
+
+func TestIsCompressible_CoversOpenAPI(t *testing.T) {
+	// The spec is the largest text response after /export and the first thing
+	// every generated client fetches; huma serves it as application/openapi+json.
+	for _, ct := range []string{
+		"application/openapi+json", "application/openapi+yaml",
+		"application/json", "application/problem+json",
+		"application/openapi+json; charset=utf-8",
+	} {
+		if !isCompressible(ct) {
+			t.Errorf("isCompressible(%q) = false, want true", ct)
+		}
+	}
+	for _, ct := range []string{"image/jpeg", "image/png", "application/octet-stream"} {
+		if isCompressible(ct) {
+			t.Errorf("isCompressible(%q) = true, want false", ct)
+		}
+	}
+}
