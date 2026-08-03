@@ -96,14 +96,34 @@ func main() {
 	}
 
 	start := time.Now()
-	copied, failed := run(ctx, src, dst, keys, *workers)
+	copied, failed, interrupted := run(ctx, src, dst, keys, *workers)
 
-	log.Printf("done in %s: %d copied, %d failed", time.Since(start).Round(time.Millisecond), copied, failed)
-	if failed > 0 {
-		// Non-zero exit so a scripted run can't mistake a partial copy for a
-		// finished one. Re-running is safe and will retry the failures.
+	// The success condition is "every key made it", not "nothing reported an
+	// error". Those are not the same: an interrupted run abandons keys that
+	// were never fed to a worker and cancels uploads already in flight, and
+	// neither of those is a failure any worker observes. Keying the exit code
+	// off `failed` alone let a Ctrl-C'd run that copied 500 of 1,700 objects
+	// print "0 failed" and exit 0 — enough for `migrate-media && <cut over to
+	// R2>` to proceed onto a bucket missing two thirds of its images. Deriving
+	// the shortfall from len(keys) instead cannot drift, because it counts what
+	// was asked for rather than what happened to be noticed.
+	log.Printf("done in %s: %d/%d copied, %d failed", time.Since(start).Round(time.Millisecond), copied, len(keys), failed)
+	if missing := shortfall(copied, len(keys)); missing > 0 {
+		if interrupted {
+			log.Printf("interrupted: %d objects were not copied — re-run to finish (re-running is safe)", missing)
+		} else {
+			log.Printf("%d objects were not copied — re-run to retry (re-running is safe)", missing)
+		}
 		os.Exit(1)
 	}
+}
+
+// shortfall is how many of total never made it. Extracted from main purely so
+// it is testable: the defect this replaced lived in main's exit condition
+// (`if failed > 0`), which no test could reach, and so a rule that was wrong
+// for the entire interrupted-run case looked fine in review and in CI.
+func shortfall(copied int64, total int) int64 {
+	return int64(total) - copied
 }
 
 // collectKeys walks root and returns every regular file as a storage key
@@ -154,14 +174,17 @@ func collectKeys(root string) ([]string, error) {
 	return keys, nil
 }
 
-// run copies keys from src to dst using workers concurrent uploads, and
-// returns how many succeeded and failed.
+// run copies keys from src to dst using workers concurrent uploads. It
+// returns how many succeeded, how many failed outright, and whether the run
+// was cut short by context cancellation.
 //
 // A failed object is logged and counted, never fatal: one unreadable file or
 // one transient 5xx should not abandon the other 1,700 objects when the whole
 // command is safe to re-run. The non-zero exit in main is what stops a
-// partial copy from being mistaken for a complete one.
-func run(ctx context.Context, src, dst media.Store, keys []string, workers int) (copied, failed int64) {
+// partial copy from being mistaken for a complete one — and it compares
+// copied against len(keys) rather than trusting failed, precisely because
+// interruption skips keys without any worker ever counting them.
+func run(ctx context.Context, src, dst media.Store, keys []string, workers int) (copied, failed int64, interrupted bool) {
 	if workers > len(keys) {
 		workers = len(keys)
 	}
@@ -193,17 +216,19 @@ func run(ctx context.Context, src, dst media.Store, keys []string, workers int) 
 		select {
 		case work <- key:
 		case <-ctx.Done():
-			// Stop feeding on Ctrl-C; already-started uploads finish or fail
-			// on their own context, and the counts below reflect reality.
+			// Stop feeding on Ctrl-C. Every remaining key is silently dropped
+			// here — no worker sees it, so nothing increments failed — which is
+			// exactly why the interrupted flag travels back to main rather than
+			// letting the counts speak for themselves.
 			close(work)
 			wg.Wait()
-			return atomic.LoadInt64(&copied), atomic.LoadInt64(&failed)
+			return atomic.LoadInt64(&copied), atomic.LoadInt64(&failed), true
 		}
 	}
 	close(work)
 	wg.Wait()
 
-	return atomic.LoadInt64(&copied), atomic.LoadInt64(&failed)
+	return atomic.LoadInt64(&copied), atomic.LoadInt64(&failed), ctx.Err() != nil
 }
 
 // copyOne streams one object from src to dst.

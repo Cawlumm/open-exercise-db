@@ -33,7 +33,16 @@ type Pagination struct {
 // same mechanism conditional.Params already relies on, so embedding this
 // documents the parameters once rather than per endpoint.
 type PageParams struct {
-	Page int `query:"page" minimum:"1" default:"1" doc:"1-based page number"`
+	// Bounded above as well as below. `minimum:"1"` alone left Page accepting
+	// any int64 huma could parse, and Offset multiplies it — `?page=` near
+	// math.MaxInt64 wrapped to a *negative* product, which Postgres rejects
+	// with "OFFSET must not be negative" and mapStoreError turns into a 500.
+	// A public unauthenticated API where one query parameter reliably 500s
+	// four endpoints is a denial-of-service primitive, not a validation gap,
+	// so the ceiling is enforced twice: here, where huma answers a real
+	// request with a 422 naming the parameter, and again in Normalize for
+	// direct handler calls that bypass tag validation entirely.
+	Page int `query:"page" minimum:"1" maximum:"100000" default:"1" doc:"1-based page number; maximum 100000"`
 	// Capped at 100 on every endpoint, not just the expensive ones: this is a
 	// public unauthenticated API, and a uniform ceiling is one number for a
 	// consumer to remember rather than a per-endpoint lookup.
@@ -53,6 +62,15 @@ const defaultPerPage = 50
 // entirely and would otherwise issue an unbounded query.
 const maxPerPage = 100
 
+// maxPage matches PageParams.Page's `maximum` tag. Its job is arithmetic
+// rather than product policy: maxPage*maxPerPage is 10,000,000, so
+// Offset's multiplication cannot overflow on any platform where int is at
+// least 32 bits, which is what actually makes its "never negative" promise
+// true. Nothing real pages this deep — 100,000 pages of the smallest useful
+// size is already far past the largest collection this API serves — so the
+// ceiling costs no legitimate caller anything.
+const maxPage = 100_000
+
 // Normalize returns the page and per-page values to actually query with,
 // clamping anything out of range rather than erroring. Requests that reach a
 // handler through huma have already been validated against the struct tags,
@@ -61,8 +79,11 @@ const maxPerPage = 100
 // that production can never hit.
 func (p PageParams) Normalize() (page, perPage int) {
 	page = p.Page
-	if page < 1 {
+	switch {
+	case page < 1:
 		page = 1
+	case page > maxPage:
+		page = maxPage
 	}
 	perPage = p.PerPage
 	switch {
@@ -74,8 +95,11 @@ func (p PageParams) Normalize() (page, perPage int) {
 	return page, perPage
 }
 
-// Offset is the SQL OFFSET for this page. Paired with Normalize's clamping so
-// it can never return a negative offset.
+// Offset is the SQL OFFSET for this page. Normalize bounds both factors —
+// page to [1, maxPage] and perPage to [1, maxPerPage] — before they are
+// multiplied, so the product is always in [0, maxPage*maxPerPage] and can
+// neither overflow nor come out negative. Clamping the low end alone was not
+// enough: an unbounded page wrapped int64 and produced a negative OFFSET.
 func (p PageParams) Offset() int {
 	page, perPage := p.Normalize()
 	return (page - 1) * perPage
