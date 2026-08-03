@@ -420,3 +420,188 @@ func TestEscapeLikePattern_EscapesBackslashFirst(t *testing.T) {
 		}
 	}
 }
+
+// TestSearchIsWordOrderIndependent covers the biggest usability gap found by
+// probing: the whole query was matched as one substring, so word order was
+// significant. `q=bench press` found 21 exercises and `q=press bench` found
+// none — the same intent, and the empty answer indistinguishable from "we have
+// nothing like that".
+func TestSearchIsWordOrderIndependent(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+
+	for _, name := range []string{
+		"Barbell Bench Press", "Dumbbell Bench Press", "Bench Dips", "Barbell Squat",
+	} {
+		seedExercise(t, ctx, pool, exerciseFixture{
+			slug: slugify(name), name: name,
+			muscleGroup: "chest", equipment: "barbell", category: "strength",
+		})
+	}
+
+	total := func(q string) int {
+		t.Helper()
+		out, err := ListExercises(ctx, s, "", &ListExercisesInput{Q: q})
+		if err != nil {
+			t.Fatalf("ListExercises(q=%q): %v", q, err)
+		}
+		return out.Body.Total
+	}
+
+	if a, b := total("bench press"), total("press bench"); a != b {
+		t.Errorf("q=%q found %d but q=%q found %d; word order must not matter",
+			"bench press", a, "press bench", b)
+	}
+	if got := total("bench press"); got != 2 {
+		t.Errorf("q=\"bench press\" matched %d, want 2 (both bench presses)", got)
+	}
+	// Adding a word must narrow, never widen — the AND semantics a type-ahead
+	// depends on as the user keeps typing.
+	if narrow, broad := total("barbell bench press"), total("bench press"); narrow > broad {
+		t.Errorf("adding a word widened the search: %d > %d", narrow, broad)
+	}
+	if got := total("barbell bench press"); got != 1 {
+		t.Errorf("q=\"barbell bench press\" matched %d, want 1", got)
+	}
+	// Extra whitespace is not a term.
+	if a, b := total("  bench   press  "), total("bench press"); a != b {
+		t.Errorf("whitespace changed the result: %d vs %d", a, b)
+	}
+}
+
+// TestSearchRanksBestMatchFirst pins the ordering a type-ahead depends on. With
+// plain alphabetical order, `q=bench` put "Barbell Bench Press" ahead of
+// "Bench Dips", so a suggestion list showing three results never showed the
+// ones whose names actually start with what was typed.
+func TestSearchRanksBestMatchFirst(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+
+	for _, name := range []string{
+		"Zercher Squat",       // contains, alphabetically last
+		"Squat",               // exact match
+		"Squat Jerk",          // prefix match
+		"Barbell Squat Press", // contains, alphabetically first
+	} {
+		seedExercise(t, ctx, pool, exerciseFixture{
+			slug: slugify(name), name: name,
+			muscleGroup: "chest", equipment: "barbell", category: "strength",
+		})
+	}
+
+	out, err := ListExercises(ctx, s, "", &ListExercisesInput{Q: "squat"})
+	if err != nil {
+		t.Fatalf("ListExercises: %v", err)
+	}
+	if len(out.Body.Exercises) < 3 {
+		t.Fatalf("got %d results, want at least 3", len(out.Body.Exercises))
+	}
+
+	got := []string{}
+	for _, e := range out.Body.Exercises {
+		got = append(got, e.Translation.Name)
+	}
+	if got[0] != "Squat" {
+		t.Errorf("first result is %q, want the exact match %q (order: %v)", got[0], "Squat", got)
+	}
+	if got[1] != "Squat Jerk" {
+		t.Errorf("second result is %q, want the prefix match %q (order: %v)", got[1], "Squat Jerk", got)
+	}
+}
+
+// TestSearchPagesAreStableAndComplete guards the property relevance ordering
+// could quietly break: a non-total ORDER BY lets rows shift between the query
+// for page 1 and the query for page 2, silently duplicating or dropping them.
+func TestSearchPagesAreStableAndComplete(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+
+	// Deliberately many identical names, so the CASE rank and the length
+	// tiebreak are both ties and only the final e.id tiebreak separates them.
+	for i := range 12 {
+		seedExercise(t, ctx, pool, exerciseFixture{
+			slug: "tied-press-" + string(rune('a'+i)), name: "Tied Press",
+			muscleGroup: "chest", equipment: "barbell", category: "strength",
+		})
+	}
+
+	seen := map[string]bool{}
+	const perPage = 5
+	for page := 1; page <= 3; page++ {
+		out, err := ListExercises(ctx, s, "", &ListExercisesInput{
+			Q: "tied press", PageParams: PageParams{Page: page, PerPage: perPage},
+		})
+		if err != nil {
+			t.Fatalf("page %d: %v", page, err)
+		}
+		for _, e := range out.Body.Exercises {
+			if seen[e.ID] {
+				t.Errorf("exercise %s (%s) appeared on more than one page", e.Slug, e.ID)
+			}
+			seen[e.ID] = true
+		}
+	}
+	if len(seen) != 12 {
+		t.Errorf("paged through %d distinct exercises, want 12 — rows were dropped across page boundaries", len(seen))
+	}
+}
+
+// TestSlugFilter closes a gap rather than fixing a wrong answer: every response
+// carries a slug, but there was no way to look one back up. The path takes a
+// UUID, so a consumer holding a slug had only substring search, which can match
+// several rows or none.
+func TestSlugFilter(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+
+	seedExercise(t, ctx, pool, exerciseFixture{
+		slug: "bench-press", name: "Bench Press",
+		muscleGroup: "chest", equipment: "barbell", category: "strength",
+	})
+	// A second slug that *contains* the first, so an exact match is
+	// distinguishable from a substring one.
+	seedExercise(t, ctx, pool, exerciseFixture{
+		slug: "bench-press-wide", name: "Bench Press Wide",
+		muscleGroup: "chest", equipment: "barbell", category: "strength",
+	})
+
+	out, err := ListExercises(ctx, s, "", &ListExercisesInput{Slug: "bench-press"})
+	if err != nil {
+		t.Fatalf("ListExercises: %v", err)
+	}
+	if out.Body.Total != 1 {
+		t.Fatalf("total = %d, want exactly 1 — slug is an exact match, not a prefix", out.Body.Total)
+	}
+	if got := out.Body.Exercises[0].Slug; got != "bench-press" {
+		t.Errorf("slug = %q, want %q", got, "bench-press")
+	}
+
+	// An unknown slug is a legitimate empty result, not a validation error:
+	// unlike a taxonomy filter, slugs are not a closed vocabulary published by
+	// a /meta endpoint that a caller could have consulted first.
+	empty, err := ListExercises(ctx, s, "", &ListExercisesInput{Slug: "no-such-slug"})
+	if err != nil {
+		t.Fatalf("unknown slug should be an empty result, got error: %v", err)
+	}
+	if empty.Body.Total != 0 {
+		t.Errorf("total = %d, want 0", empty.Body.Total)
+	}
+}
+
+// slugify is a test helper only — the real slugs come from the importer.
+func slugify(name string) string {
+	out := []rune{}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			out = append(out, r)
+		case r >= 'A' && r <= 'Z':
+			out = append(out, r+32)
+		default:
+			if len(out) > 0 && out[len(out)-1] != '-' {
+				out = append(out, '-')
+			}
+		}
+	}
+	return string(out)
+}

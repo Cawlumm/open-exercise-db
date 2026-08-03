@@ -79,7 +79,11 @@ type TranslationSummary struct {
 // checkNotModified in api.go for how the response side uses it.
 type ListExercisesInput struct {
 	conditional.Params
-	Q           string `query:"q" doc:"Case-insensitive substring match against exercise name and aliases"`
+	Q string `query:"q" doc:"Case-insensitive search over exercise name and aliases. Every whitespace-separated word must appear, in any order, so adding a word narrows the results."`
+	// Every response carries a slug, so a consumer that stored one had no way
+	// to look it back up: the path takes a UUID and there was no slug filter,
+	// leaving only a substring search that could match several rows or none.
+	Slug        string `query:"slug" doc:"Exact match on an exercise's slug — the stable human-readable identifier returned in every response"`
 	MuscleGroup string `query:"muscle_group" doc:"Taxonomy slug filter; see GET /meta/muscle-groups"`
 	Equipment   string `query:"equipment" doc:"Taxonomy slug filter; see GET /meta/equipment"`
 	Category    string `query:"category" doc:"Taxonomy slug filter; see GET /meta/categories"`
@@ -240,6 +244,7 @@ func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, inp
 	page, perPage := input.Normalize()
 	filter := store.ExerciseFilter{
 		Q:           input.Q,
+		Slug:        input.Slug,
 		MuscleGroup: input.MuscleGroup,
 		Equipment:   input.Equipment,
 		Category:    input.Category,

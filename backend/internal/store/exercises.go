@@ -27,7 +27,13 @@ const defaultPerPage = 50
 // pagination fields is an exact match against a taxonomy slug. A zero-value
 // field means "no filter" for that dimension.
 type ExerciseFilter struct {
-	Q           string // case-insensitive substring match against name + aliases
+	Q string // case-insensitive; every whitespace-separated word must appear in name or aliases
+	// Slug is an exact match on the human-readable identifier. Every response
+	// carries a slug, so a consumer that stored one previously had no way to
+	// look it back up: the path takes a UUID and there was no slug filter, so
+	// the only route was a substring search that could match several rows or
+	// none.
+	Slug        string
 	MuscleGroup string
 	Equipment   string
 	Category    string
@@ -70,13 +76,14 @@ func (s *ExerciseStore) List(ctx context.Context, filter ExerciseFilter) ([]mode
 	offset := (page - 1) * perPage
 
 	listArgs := append(append([]any{}, args...), perPage, offset)
+	orderBy, listArgs := exerciseOrderBy(filter.Q, listArgs)
 	query := fmt.Sprintf(`
 		SELECT %s
 		FROM exercises e
 		JOIN exercise_revisions r ON r.id = e.current_revision_id
 		WHERE %s
-		ORDER BY r.name ASC, e.id ASC
-		LIMIT $%d OFFSET $%d`, exerciseRevisionColumns, where, len(args)+1, len(args)+2)
+		ORDER BY %s
+		LIMIT $%d OFFSET $%d`, exerciseRevisionColumns, where, orderBy, len(args)+1, len(args)+2)
 
 	rows, err := s.pool.Query(ctx, query, listArgs...)
 	if err != nil {
@@ -281,26 +288,36 @@ func buildExerciseWhere(filter ExerciseFilter) (string, []any) {
 		conditions = append(conditions, fmt.Sprintf("%s = $%d", column, len(args)))
 	}
 
-	if filter.Q != "" {
+	// Each whitespace-separated word must appear somewhere in the name or
+	// aliases, in any order.
+	//
+	// Matching the whole query as one substring made word order significant,
+	// which is not how anyone searches: `q=bench press` found 21 exercises
+	// while `q=press bench` found none, and `q=barbell bench` found 5 where
+	// `q=bench barbell` found 1 — the same intent, wildly different answers,
+	// with the empty one indistinguishable from "we have nothing like that".
+	// It also meant punctuation in the data broke the query: `q=push up`
+	// matched a single exercise because the rest are spelled "Push-Up".
+	//
+	// AND across terms rather than OR: adding a word should narrow a search,
+	// which is the universal convention and the only one that makes a
+	// type-ahead usable as the user keeps typing.
+	for _, term := range strings.Fields(filter.Q) {
 		// The term is escaped before being wrapped in wildcards, and the
-		// pattern declares its escape character explicitly.
-		//
-		// Without this, LIKE metacharacters in user input were live: `?q=%`
-		// built the pattern `%%%`, which matches every row, so a caller
-		// searching for a literal percent sign received all 873 exercises as a
-		// confident 200. `?q=_` behaved the same way (`%_%` matches anything at
-		// least one character long), and a real term like "100%" silently
-		// matched far more than it should. Parameterization already made this
-		// safe from injection — it was never a security hole — but safe and
-		// correct are different properties, and this wrong answer looked
-		// exactly like a right one.
-		args = append(args, "%"+escapeLikePattern(filter.Q)+"%")
+		// pattern declares its escape character explicitly. Without this, LIKE
+		// metacharacters in user input were live: `?q=%` built `%%%`, which
+		// matches every row, so a caller searching for a literal percent sign
+		// received all 873 exercises as a confident 200. Parameterization
+		// already made this safe from injection — it was never a security hole
+		// — but safe and correct are different properties.
+		args = append(args, "%"+escapeLikePattern(term)+"%")
 		n := len(args)
 		conditions = append(conditions, fmt.Sprintf(
 			`(r.name ILIKE $%d ESCAPE '\' OR EXISTS (SELECT 1 FROM unnest(r.aliases) AS alias WHERE alias ILIKE $%d ESCAPE '\'))`,
 			n, n,
 		))
 	}
+	addEq("e.slug", filter.Slug)
 	addEq("r.muscle_group", filter.MuscleGroup)
 	addEq("r.equipment", filter.Equipment)
 	addEq("r.category", filter.Category)
@@ -308,6 +325,49 @@ func buildExerciseWhere(filter ExerciseFilter) (string, []any) {
 	addEq("r.level", filter.Level)
 
 	return strings.Join(conditions, " AND "), args
+}
+
+// exerciseOrderBy returns the ORDER BY clause for a list query, plus the args
+// slice it may have appended a parameter to.
+//
+// With no search term, alphabetical by name is the right default for browsing.
+// With one, it is actively bad: `q=bench` put "Barbell Bench Press - Medium
+// Grip" first and the exercise actually called "Bench Press" nowhere near the
+// top, so a type-ahead showing three suggestions never showed the obvious one.
+// Alphabetical order is only a proxy for relevance when every result is equally
+// relevant, and after a search none of them are.
+//
+// The ranking is deliberately crude — exact name, then name starts with the
+// query, then everything else — because the alternative is Postgres full-text
+// search, and that is a different feature with different tradeoffs (stemming
+// that would have to be locale-aware across every translation, a tsvector
+// column and its maintenance, and ts_rank behaviour that is much harder to
+// explain to a consumer than "exact matches first"). This gets the obvious case
+// right at the cost of one CASE expression.
+//
+// Shorter names break the tie before alphabetical: among equally-ranked
+// substring matches, "Bench Press" is a better answer for `q=bench` than
+// "Barbell Incline Bench Press - Medium Grip", and length is a decent proxy for
+// how much of the name the query accounts for. e.id ASC stays as the final
+// tiebreak so the ordering is total and pagination cannot duplicate or drop a
+// row across a page boundary.
+func exerciseOrderBy(q string, listArgs []any) (string, []any) {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return "r.name ASC, e.id ASC", listArgs
+	}
+
+	listArgs = append(listArgs, q)
+	n := len(listArgs)
+	return fmt.Sprintf(`
+		CASE
+			WHEN lower(r.name) = lower($%d) THEN 0
+			WHEN lower(r.name) LIKE lower($%d) || '%%' THEN 1
+			ELSE 2
+		END ASC,
+		length(r.name) ASC,
+		r.name ASC,
+		e.id ASC`, n, n), listArgs
 }
 
 // escapeLikePattern neutralizes the three characters LIKE treats specially, so
