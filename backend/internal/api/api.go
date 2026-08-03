@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Cawlumm/open-exercise-db/internal/export"
+	"github.com/Cawlumm/open-exercise-db/internal/media"
 	"github.com/Cawlumm/open-exercise-db/internal/ratelimit"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
 )
@@ -30,17 +31,26 @@ import (
 const cacheControl = "public, max-age=300, stale-while-revalidate=86400"
 
 // Register wires every Phase 1 read operation (docs/PHASE1_BUILD_PLAN.md
-// WO-3 and WO-5) onto api against the given stores. exportCache and
-// limiter are both constructed and owned by cmd/api-server/main.go,
+// WO-3 and WO-5) onto api against the given stores. exportCache, limiter,
+// and mediaStore are all constructed and owned by cmd/api-server/main.go,
 // matching docs/CONVENTIONS.md section 2's DI pattern (constructors wired
 // in main, passed in). Called once from main; main itself stays thin.
+//
+// mediaStore backs GET /api/v1/images/{id} (internal/api/images.go) — the
+// same media.Store implementation (filesystem in Phase 1, R2 in Phase 2)
+// cmd/import-freeexercisedb writes images to. imageBaseURL is
+// internal/config.Config.ImageBaseURL, threaded down to
+// registerExerciseRoutes/registerExportRoutes so GET /exercises, GET
+// /exercises/{id}, and GET /exercises/export can resolve
+// contract.Exercise.Images[].url — see internal/media.ImageURL for what it
+// controls.
 //
 // limiter's middleware (internal/api/ratelimit.go) is installed via
 // hapi.UseMiddleware before any route is registered, so it runs ahead of
 // every operation below — docs/PHASE1_BUILD_PLAN.md WO-7's rate limiting
 // and User-Agent policy apply uniformly to every GET this package exposes,
 // not opted into per-route.
-func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter *ratelimit.Limiter) {
+func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter *ratelimit.Limiter, mediaStore media.Store, imageBaseURL string) {
 	hapi.UseMiddleware(rateLimitMiddleware(hapi, limiter))
 
 	// registerExportRoutes intentionally comes before registerExerciseRoutes.
@@ -66,8 +76,9 @@ func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter 
 	// the more specific path first and neither router's resolution rule
 	// matters.
 	registerExportRoutes(hapi, s, exportCache)
-	registerExerciseRoutes(hapi, s)
+	registerExerciseRoutes(hapi, s, imageBaseURL)
 	registerMetaRoutes(hapi, s)
+	registerImageRoutes(hapi, s, mediaStore)
 }
 
 // mapStoreError translates a store-layer error into a typed huma error, per
@@ -129,6 +140,17 @@ func etagValue(body any) string {
 // grammar.
 func etagHeader(tag string) string {
 	return `"` + tag + `"`
+}
+
+// etagValueBytes mirrors etagValue for a raw byte body instead of a
+// JSON-marshaled struct — GET /api/v1/images/{id} (internal/api/images.go)
+// has no JSON body to hash, just the image bytes themselves. Same truncated
+// sha256-hex convention as etagValue, so both share one quoting/comparison
+// path (etagHeader, checkNotModified) with no special-casing for the binary
+// response.
+func etagValueBytes(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:16])
 }
 
 // checkNotModified implements RFC 9110 §13.1.2 conditional-GET

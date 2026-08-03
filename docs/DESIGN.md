@@ -252,6 +252,7 @@ GET /exercises/{id}/revisions
 GET /exercises/{id}/translations
 GET /exercises/export                       # pre-generated static JSON, CDN-served
 GET /meta/muscle-groups | /equipment | /categories | /locales   # ?locale= for translated labels
+GET /images/{id}                            # re-hosted image bytes — see Images below
 
 # Write — GitHub-OAuth JWT required
 POST /submissions                           # { type, locale?, payload, image_upload_ids[], video_upload_ids[] }
@@ -274,6 +275,44 @@ POST /admin/exercises/{id}/revert/{revision_id}
 lookups (or the reverse) doesn't rewrite its mapping. It is deliberately **not** shaped to
 any single consumer's schema: consumers adapt to this API, not the other way round. See
 [Consuming this API](#consuming-this-api).
+
+### Images
+
+`contract.Exercise.images[]` (rendered identically by `/exercises`, `/exercises/{id}`, and
+`/exercises/export` — one shared Go type, see `internal/contract/doc.go`) carries `id`, `url`,
+`width`, `height`, `content_type`, `license`, and `attribution_text` per image — enough for a
+client to fetch and render it directly, modeled on Open Food Facts' own per-product image
+metadata. This replaced an earlier `image_ids` field that shipped only opaque UUIDs with no
+resolution path — a consumer could never actually display an image, which is the defect this
+shape exists to close.
+
+`url` is resolved from `IMAGE_BASE_URL` (`internal/config.Config.ImageBaseURL`,
+`internal/media.ImageURL`):
+
+- **Set** (production, once R2 lands): `{IMAGE_BASE_URL}/{storage_key}`, pointing straight at
+  object storage/CDN — image bytes never touch the API process, the same split OFF gets from
+  `images.openfoodfacts.org`.
+- **Unset** (local dev, self-host — the Phase 1 default): falls back to this API's own
+  `GET /images/{id}`, which streams the identical bytes through `media.Store.Get`. Long
+  `Cache-Control: immutable` (image bytes never change once stored — a re-import that matches
+  an existing upload reuses its row rather than writing a new one) and the same conditional-GET
+  `ETag`/`If-None-Match` handling every other `GET` in this API uses.
+
+Either way `contract.Exercise` doesn't change shape — only which host the URL points at, which
+is exactly the config-not-code seam that lets production adopt OFF's separate-image-host model
+later without touching a client.
+
+**Bytes never live in Postgres**, mirroring OFF's own product-image handling: `exercise_images`
+stores metadata only (`storage_key`, `content_type`, dimensions, license/attribution),
+`media.Store` (filesystem in Phase 1, R2 in Phase 2) holds the actual bytes. A relational
+database is the wrong place for binary blobs at any real scale — no query ever needs to filter
+or join on image *content*, only its metadata, so storing bytes there would just make routine
+backups/replication larger and slower for zero query benefit.
+
+Multiple pre-generated resolutions (OFF serves 100/200/400px + full-size variants per image) are
+explicitly out of scope for Phase 1 — `GET /images/{id}` always serves the one re-encoded,
+~800px-capped version `internal/media/encode.go` produces at import time. A Phase 2 follow-on if
+thumbnail-sized responses turn out to matter for a real consumer.
 
 **Build order:** Phase 1 ships every `GET` above, no auth. Phase 1.5 enriches seed data (no
 new endpoints). Phase 2 adds auth + every write/moderation endpoint — by the end of Phase 2

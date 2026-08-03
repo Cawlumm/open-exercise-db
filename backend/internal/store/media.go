@@ -44,6 +44,70 @@ func (s *MediaStore) GetImageByStorageKey(ctx context.Context, storageKey string
 	return img, nil
 }
 
+// GetImageByID returns the exercise_images row for id, or pgx.ErrNoRows if
+// none exists — GET /api/v1/images/{id} (internal/api/images.go) uses this
+// to resolve storage_key/content_type before streaming bytes from
+// media.Store, and mapStoreError translates the not-found case to a 404
+// there, same as every other id lookup in this package.
+func (s *MediaStore) GetImageByID(ctx context.Context, id string) (model.Image, error) {
+	query := fmt.Sprintf(`SELECT %s FROM exercise_images WHERE id = $1`, imageColumns)
+
+	var img model.Image
+	err := s.pool.QueryRow(ctx, query, id).Scan(
+		&img.ID, &img.StorageKey, &img.ContentType, &img.Width, &img.Height,
+		&img.License, &img.AttributionText, &img.UploadedBy, &img.Status, &img.CreatedAt,
+	)
+	if err != nil {
+		return model.Image{}, err
+	}
+	return img, nil
+}
+
+// ListImagesByIDs returns the exercise_images rows for ids, in the same
+// order as ids — the order a revision's image_ids[] array establishes
+// (docs/DESIGN.md's "Images/videos are separate tables" note), and the order
+// internal/media.BuildImages preserves into contract.Exercise.Images. Any id
+// with no matching row is silently skipped rather than erroring: in
+// practice this never happens (an id only ever lands in image_ids after its
+// exercise_images row exists — see internal/seed's insert-then-attach
+// import ordering), and a single dangling reference shouldn't take down an
+// otherwise-servable exercise response.
+func (s *MediaStore) ListImagesByIDs(ctx context.Context, ids []string) ([]model.Image, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	query := fmt.Sprintf(`SELECT %s FROM exercise_images WHERE id = ANY($1)`, imageColumns)
+	rows, err := s.pool.Query(ctx, query, ids)
+	if err != nil {
+		return nil, fmt.Errorf("list images by ids: %w", err)
+	}
+	defer rows.Close()
+
+	byID := make(map[string]model.Image, len(ids))
+	for rows.Next() {
+		var img model.Image
+		if err := rows.Scan(
+			&img.ID, &img.StorageKey, &img.ContentType, &img.Width, &img.Height,
+			&img.License, &img.AttributionText, &img.UploadedBy, &img.Status, &img.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan image: %w", err)
+		}
+		byID[img.ID] = img
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list images by ids: %w", err)
+	}
+
+	images := make([]model.Image, 0, len(ids))
+	for _, id := range ids {
+		if img, ok := byID[id]; ok {
+			images = append(images, img)
+		}
+	}
+	return images, nil
+}
+
 // InsertImageInput is the set of fields the importer controls when
 // re-hosting an image. UploadedBy is always nil for the free-exercise-db
 // bootstrap, mirroring exercise_revisions.submitted_by=NULL for the same

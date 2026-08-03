@@ -54,6 +54,13 @@ func main() {
 
 	var mediaStore media.Store
 	if !*dryRun {
+		// cfg.MediaDir is always absolute now (config.Load resolves it) —
+		// logged here so it's obvious which directory this run actually wrote
+		// to, rather than depending on whatever directory the command
+		// happened to be started from (the exact split that previously sent
+		// one run's images to ./data/media and another's to
+		// ./backend/data/media with nothing recording which).
+		log.Printf("re-hosting images to %s", cfg.MediaDir)
 		fsStore, err := media.NewFilesystemStore(cfg.MediaDir)
 		if err != nil {
 			log.Fatalf("init media store at %s: %v", cfg.MediaDir, err)

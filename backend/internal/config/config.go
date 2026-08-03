@@ -3,6 +3,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 )
 
@@ -27,8 +28,29 @@ type Config struct {
 
 	// MediaDir is where internal/media.FilesystemStore re-hosts images
 	// locally in Phase 1 (R2 doesn't land until Phase 2 — see
-	// docs/PHASE1_BUILD_PLAN.md WO-4 and internal/media/doc.go).
+	// docs/PHASE1_BUILD_PLAN.md WO-4 and internal/media/doc.go). Always
+	// resolved to an absolute path by Load (see below) — never used as the
+	// raw, possibly-relative env value.
 	MediaDir string
+
+	// ImageBaseURL, when set, is the external host contract.Exercise.Images
+	// URLs point at instead of this API's own GET /api/v1/images/{id} route
+	// — production's Cloudflare R2/CDN host, once Phase 2's migration off
+	// FilesystemStore lands, mirroring Open Food Facts' separate
+	// images.openfoodfacts.org host so image bytes never touch the API
+	// process (docs/DESIGN.md's "Alignment with Open Food Facts"). Empty in
+	// local dev and self-host (the Phase 1 default): internal/media.ImageURL
+	// falls back to the local route, which serves the exact same bytes via
+	// media.Store — the seam that lets production adopt OFF's
+	// separate-image-host model as a config change, not a code change.
+	//
+	// Not the same setting as cmd/import-freeexercisedb's `-image-base` flag
+	// (internal/seed.Options.ImageBaseURL): that one resolves
+	// free-exercise-db's *upstream* relative image paths at import time: this
+	// one resolves *this API's own* re-hosted images at read time. They
+	// happen to share a name in different packages; see
+	// internal/media.ImageURL's doc comment for the same clarification.
+	ImageBaseURL string
 
 	// RateLimit configures internal/ratelimit's per-instance origin
 	// backstop (docs/PHASE1_BUILD_PLAN.md WO-7, docs/API_POLICY.md). Every
@@ -100,7 +122,8 @@ func Load() Config {
 		R2SecretAccessKey: os.Getenv("R2_SECRET_ACCESS_KEY"),
 		R2Bucket:          os.Getenv("R2_BUCKET"),
 
-		MediaDir: getEnv("MEDIA_DIR", "./data/media"),
+		MediaDir:     resolveMediaDir(getEnv("MEDIA_DIR", "./data/media")),
+		ImageBaseURL: os.Getenv("IMAGE_BASE_URL"),
 
 		// See RateLimitConfig's doc comment for why these particular
 		// defaults, and internal/api/ratelimit_test.go /
@@ -125,6 +148,24 @@ func Load() Config {
 			UnidentifiedBurst: getEnvInt("OEDB_RATELIMIT_UNIDENTIFIED_BURST", 2),
 		},
 	}
+}
+
+// resolveMediaDir converts dir to an absolute path, so where images actually
+// land on disk stops depending on the current process's working directory —
+// the exact defect this fixes: `MEDIA_DIR=./data/media` (the default)
+// resolved to two different real directories depending on whether the
+// process was started from the repo root or from backend/, silently
+// splitting a single import's output across two locations with nothing to
+// flag the mismatch. filepath.Abs can only fail if os.Getwd fails (a
+// genuinely broken process environment), in which case dir is returned
+// unresolved rather than failing startup outright — main logs whatever this
+// returns, so even that degraded case is visible rather than silent.
+func resolveMediaDir(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return dir
+	}
+	return abs
 }
 
 func getEnv(key, fallback string) string {

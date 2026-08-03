@@ -20,7 +20,7 @@ to serve; the full-catalog export costs the most.
 
 | Tier | Applies to | Limit | Why |
 |---|---|---|---|
-| Read | `GET /exercises/{id}`, `GET /meta/*` | 60 req/min/IP | Cheap, cached, single-row/short-list reads |
+| Read | `GET /exercises/{id}`, `GET /meta/*`, `GET /images/{id}` | 60 req/min/IP | Cheap, cached, single-row/short-list reads — an id-keyed image fetch is one more instance of the same shape, and its response carries a long `immutable` `Cache-Control` on top |
 | Search | `GET /exercises` | 60 req/min/IP (burst up to 20) | Matched to Read rather than set below it — live lookup is the primary integration model, so search is *its* main endpoint. Still assumes a *debounced* client, not a per-keystroke one — see [Debounce your search](#debounce-your-search-not-optional) |
 | Export | `GET /exercises/export` | 5 req/min/IP | The heaviest single request in the API — see [Mirror the dump, don't poll it](#mirror-the-dump-dont-poll-it) |
 | Unidentified | Any request without a conformant `User-Agent` | 5 req/min/IP, replacing whatever tier the endpoint would otherwise use | See [User-Agent requirement](#user-agent-requirement) |
@@ -238,7 +238,7 @@ Create one rate-limiting rule per tier, all scoped to this zone/hostname:
 
 | Rule name | Match | Rate | Action |
 |---|---|---|---|
-| `oedb-read` | `http.request.uri.path matches "^/api/v1/(exercises/[^/]+|meta/.*)$"` and method `GET` | 60 requests / 60s, per IP | Block for 60s |
+| `oedb-read` | `http.request.uri.path matches "^/api/v1/(exercises/[^/]+|meta/.*|images/[^/]+)$"` and method `GET` | 60 requests / 60s, per IP | Block for 60s |
 | `oedb-search` | `http.request.uri.path eq "/api/v1/exercises"` and method `GET` | 30 requests / 60s, per IP | Block for 60s |
 | `oedb-export` | `http.request.uri.path eq "/api/v1/exercises/export"` and method `GET` | 5 requests / 60s, per IP | Block for 300s |
 | `oedb-global-fallback` | `http.request.uri.path matches "^/api/v1/.*"` | 300 requests / 60s, per IP | Block for 60s (catches anything the per-tier rules above don't match, e.g. a future endpoint added without an accompanying rule) |

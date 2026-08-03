@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Cawlumm/open-exercise-db/internal/contract"
+	"github.com/Cawlumm/open-exercise-db/internal/media"
 	"github.com/Cawlumm/open-exercise-db/internal/model"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
 )
@@ -81,13 +82,21 @@ type Cache struct {
 	mu   sync.RWMutex
 	blob *Blob
 	ttl  time.Duration
+	// imageBaseURL is internal/config.Config.ImageBaseURL, captured once at
+	// construction (not per-request — this cache is rebuilt at most once per
+	// TTL, and a base-URL change is a redeploy, not a runtime event) and
+	// threaded into buildBlob/assembleExercise so contract.Exercise.Images[].url
+	// resolves the same way here as it does for GET /exercises and GET
+	// /exercises/{id} (internal/api's resolveExercise). See
+	// internal/media.ImageURL for what it controls.
+	imageBaseURL string
 }
 
-// NewCache constructs a Cache with the given TTL. ttl <= 0 means "never
-// expire once built" — used by tests that want full control over rebuilds
-// via Invalidate rather than fighting a timer.
-func NewCache(ttl time.Duration) *Cache {
-	return &Cache{ttl: ttl}
+// NewCache constructs a Cache with the given TTL and image URL base. ttl <=
+// 0 means "never expire once built" — used by tests that want full control
+// over rebuilds via Invalidate rather than fighting a timer.
+func NewCache(ttl time.Duration, imageBaseURL string) *Cache {
+	return &Cache{ttl: ttl, imageBaseURL: imageBaseURL}
 }
 
 // Get returns the current blob, rebuilding from s first if none has been
@@ -112,7 +121,7 @@ func (c *Cache) Get(ctx context.Context, s *store.Store) (*Blob, error) {
 		return c.blob, nil
 	}
 
-	built, err := buildBlob(ctx, s)
+	built, err := buildBlob(ctx, s, c.imageBaseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +146,7 @@ func (c *Cache) Invalidate() {
 // buildBlob queries s for every published exercise and assembles the export
 // body, then computes its ETag once. This is the one place per rebuild that
 // touches Postgres — everything else is served from the cached result.
-func buildBlob(ctx context.Context, s *store.Store) (*Blob, error) {
+func buildBlob(ctx context.Context, s *store.Store, imageBaseURL string) (*Blob, error) {
 	exercises, err := s.Exercises.ListAll(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list exercises for export: %w", err)
@@ -145,7 +154,7 @@ func buildBlob(ctx context.Context, s *store.Store) (*Blob, error) {
 
 	body := Body{GeneratedAt: time.Now().UTC()}
 	for _, ex := range exercises {
-		assembled, err := assembleExercise(ctx, s, ex)
+		assembled, err := assembleExercise(ctx, s, ex, imageBaseURL)
 		if err != nil {
 			return nil, err
 		}
@@ -168,7 +177,7 @@ func buildBlob(ctx context.Context, s *store.Store) (*Blob, error) {
 // start from different store shapes (a single-page slice here vs. the same
 // per-item join there); the guarantee that matters is the *output* type
 // being identical, which contract.Exercise is by construction now.
-func assembleExercise(ctx context.Context, s *store.Store, ex model.Exercise) (contract.Exercise, error) {
+func assembleExercise(ctx context.Context, s *store.Store, ex model.Exercise, imageBaseURL string) (contract.Exercise, error) {
 	if ex.CurrentRevision == nil {
 		// store.Exercises.ListAll always joins current_revision_id; nil here
 		// is a store invariant violation, not a client-facing condition.
@@ -179,6 +188,11 @@ func assembleExercise(ctx context.Context, s *store.Store, ex model.Exercise) (c
 	resolved, err := s.Translations.GetForRevision(ctx, rev.ID, "")
 	if err != nil {
 		return contract.Exercise{}, fmt.Errorf("resolve translation for exercise %s: %w", ex.ID, err)
+	}
+
+	images, err := s.Media.ListImagesByIDs(ctx, rev.ImageIDs)
+	if err != nil {
+		return contract.Exercise{}, fmt.Errorf("resolve images for exercise %s: %w", ex.ID, err)
 	}
 
 	return contract.Exercise{
@@ -196,7 +210,7 @@ func assembleExercise(ctx context.Context, s *store.Store, ex model.Exercise) (c
 		Mechanic:         rev.Mechanic,
 		Force:            rev.Force,
 		Level:            rev.Level,
-		ImageIDs:         rev.ImageIDs,
+		Images:           media.BuildImages(images, imageBaseURL),
 		VideoIDs:         rev.VideoIDs,
 		License:          rev.License,
 		AttributionText:  rev.AttributionText,
