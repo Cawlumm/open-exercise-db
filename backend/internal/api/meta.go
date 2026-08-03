@@ -131,7 +131,7 @@ func ListTaxonomyTerms(ctx context.Context, s *store.Store, facet string, input 
 	}
 
 	_, perPage := input.Normalize()
-	terms, err := s.Taxonomy.ListTerms(ctx, facet, input.Locale, perPage, input.Offset())
+	terms, err := s.Taxonomy.ListTerms(ctx, facet, normalizeLocale(input.Locale), perPage, input.Offset())
 	if err != nil {
 		return nil, mapStoreError(err, "")
 	}
