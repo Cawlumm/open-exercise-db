@@ -30,6 +30,12 @@ import (
 // Cloud Run sends SIGTERM before the instance is killed outright.
 const shutdownGracePeriod = 10 * time.Second
 
+// apiVersion is reported by the OpenAPI document and the discovery index. One
+// constant so the two cannot disagree — a spec claiming a different version
+// than the index is the kind of contradiction a consumer notices and cannot
+// resolve.
+const apiVersion = "1.0.0"
+
 func main() {
 	cfg := config.Load()
 
@@ -99,6 +105,16 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
+	// Discovery. "/{$}" is an exact match on "/" — deliberately not the bare
+	// "/" pattern, which is a prefix wildcard matching every path and would
+	// make ServeMux stop returning 405 (see internal/api/errors.go). The three
+	// URLs a newcomer tries first all 404'd before this; now the bare host
+	// describes the API. /api/v1 gets the same document so the version prefix
+	// someone copies out of a URL is also a live entry point.
+	indexHandler := api.IndexHandler(apiVersion)
+	mux.Handle("GET /{$}", indexHandler)
+	mux.Handle("GET /api/v1/{$}", indexHandler)
+
 	// OpenAPIPath carries the full /api/v1 prefix directly (rather than
 	// humago.NewWithPrefix) so the spec and docs UI land exactly where
 	// docs/PHASE1_BUILD_PLAN.md's WO-3 specifies: spec at
@@ -106,7 +122,7 @@ func main() {
 	// would prefix *both* since it wraps every adapter.Handle call,
 	// including the ones NewAPI itself uses to register the openapi/docs
 	// routes — which would put docs under /api/v1/docs instead.
-	humaConfig := huma.DefaultConfig("open-exercise-db API", "1.0.0")
+	humaConfig := huma.DefaultConfig("open-exercise-db API", apiVersion)
 	humaConfig.OpenAPIPath = "/api/v1/openapi"
 	humaConfig.DocsPath = "/docs"
 	// An unrecognized query parameter is a client bug, and silently ignoring

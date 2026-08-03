@@ -605,3 +605,64 @@ func slugify(name string) string {
 	}
 	return string(out)
 }
+
+// TestIndexHandler covers discovery: the three URLs a newcomer tries first —
+// the bare host, /api, /api/v1 — were all dead ends, answering a correct 404 to
+// the only question someone can ask before they know anything about the API.
+func TestIndexHandler(t *testing.T) {
+	h := IndexHandler("1.2.3")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("index is not valid JSON (%v): %s", err, rec.Body.String())
+	}
+	if doc["version"] != "1.2.3" {
+		t.Errorf("version = %v, want the value passed in — the index and the OpenAPI doc must not disagree", doc["version"])
+	}
+
+	// The index exists to be actionable. A discovery document that does not
+	// name the docs or list any endpoint is decoration.
+	body := rec.Body.String()
+	for _, want := range []string{"/docs", "/api/v1/exercises", "/api/v1/meta/muscle-groups", "openapi"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("index does not mention %q", want)
+		}
+	}
+}
+
+func TestIndexHandler_IsCacheable(t *testing.T) {
+	h := IndexHandler("1.0.0")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	tag := rec.Header().Get("ETag")
+	if tag == "" {
+		t.Fatal("index has no ETag; it is the response most likely to be re-fetched while someone explores")
+	}
+
+	// Same binary, same document: the tag must be stable, or revalidation
+	// never succeeds and the cache headers are a lie.
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/", nil))
+	if got := rec2.Header().Get("ETag"); got != tag {
+		t.Errorf("ETag changed between identical requests: %q then %q", tag, got)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("If-None-Match", tag)
+	rec3 := httptest.NewRecorder()
+	h.ServeHTTP(rec3, req)
+	if rec3.Code != http.StatusNotModified {
+		t.Errorf("If-None-Match with the current tag = %d, want 304", rec3.Code)
+	}
+}
