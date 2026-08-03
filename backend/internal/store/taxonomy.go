@@ -116,16 +116,30 @@ func (s *TaxonomyStore) ListTerms(ctx context.Context, facet, locale string, lim
 	// of table that grows quietly once contributions open in Phase 2.
 	// t.slug ASC is already unique within a facet (UNIQUE (facet, slug)), so
 	// the ordering is deterministic across pages without a tiebreak column.
+	// The label lookup falls back from a regional locale to its base language
+	// the same way exercise translations do (see TranslationStore's
+	// GetForRevision). Without the base-language join, one ?locale=es-MX
+	// request returned Spanish exercise names and English filter labels — a UI
+	// built from both halves rendered Spanish exercises under English headings
+	// from a single consistent locale parameter. COALESCE prefers the exact
+	// regional label, then the base language, then English, then the slug, and
+	// served_locale reports whichever actually supplied the value rather than
+	// claiming the requested one.
 	rows, err := s.pool.Query(ctx, `
 		SELECT t.id, t.facet, t.slug,
-		       COALESCE(loc.label, en.label, t.slug) AS label,
-		       CASE WHEN loc.label IS NOT NULL THEN $2 ELSE 'en' END AS served_locale
+		       COALESCE(loc.label, base.label, en.label, t.slug) AS label,
+		       CASE
+		           WHEN loc.label IS NOT NULL THEN $2
+		           WHEN base.label IS NOT NULL THEN $3
+		           ELSE 'en'
+		       END AS served_locale
 		FROM taxonomy_terms t
 		LEFT JOIN taxonomy_term_translations loc ON loc.term_id = t.id AND loc.locale = $2
+		LEFT JOIN taxonomy_term_translations base ON base.term_id = t.id AND base.locale = $3
 		LEFT JOIN taxonomy_term_translations en ON en.term_id = t.id AND en.locale = 'en'
 		WHERE t.facet = $1
 		ORDER BY t.slug ASC
-		LIMIT $3 OFFSET $4`, facet, locale, limit, offset)
+		LIMIT $4 OFFSET $5`, facet, locale, baseLanguage(locale), limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list taxonomy terms for facet %s: %w", facet, err)
 	}

@@ -49,7 +49,12 @@ func isCompressible(contentType string) bool {
 	ct := strings.ToLower(strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0]))
 	switch ct {
 	case "application/json", "application/problem+json", "application/yaml",
-		"application/x-yaml", "text/yaml", "text/html", "text/plain", "text/csv":
+		"application/x-yaml", "text/yaml", "text/html", "text/plain", "text/csv",
+		// huma serves the OpenAPI document as application/openapi+json and
+		// +yaml. Omitting them left the spec — the single largest text response
+		// after /export, and the first thing every generated client and docs
+		// viewer fetches — as the one endpoint still sending full size.
+		"application/openapi+json", "application/openapi+yaml":
 		return true
 	}
 	return false
@@ -57,17 +62,37 @@ func isCompressible(contentType string) bool {
 
 func clientAcceptsGzip(r *http.Request) bool {
 	for _, enc := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
-		// Split off any q-value: "gzip;q=0" means the client explicitly does
-		// not want it, and treating that as acceptance would send an encoding
-		// it refused.
 		name, params, _ := strings.Cut(strings.TrimSpace(enc), ";")
 		if !strings.EqualFold(strings.TrimSpace(name), "gzip") {
 			continue
 		}
-		if strings.ReplaceAll(strings.TrimSpace(params), " ", "") == "q=0" {
+		// A qvalue of zero means "do not send me this", and sending it anyway
+		// hands binary bytes to a client that told us it cannot decode them.
+		// Parsed as a number rather than compared against the literal string
+		// "q=0": RFC 9110 §12.4.2 allows up to three fractional digits, so
+		// q=0.0 and q=0.00 are equally valid spellings of a refusal, and real
+		// proxies and HTTP libraries emit them.
+		return !isZeroQValue(params)
+	}
+	return false
+}
+
+// isZeroQValue reports whether a parameter segment such as "q=0.0" refuses the
+// encoding it is attached to.
+func isZeroQValue(params string) bool {
+	for _, param := range strings.Split(params, ";") {
+		key, value, found := strings.Cut(param, "=")
+		if !found || !strings.EqualFold(strings.TrimSpace(key), "q") {
+			continue
+		}
+		q, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil {
+			// An unparseable qvalue is a malformed header, not a refusal.
+			// Treating it as one would silently disable compression for a
+			// client that never asked to disable it.
 			return false
 		}
-		return true
+		return q == 0
 	}
 	return false
 }
@@ -153,6 +178,7 @@ func (w *gzipResponseWriter) startGzip() {
 	// and a wrong Content-Length is a truncated or hung response, not a
 	// cosmetic error.
 	header.Del("Content-Length")
+	weakenETag(header)
 
 	w.gz = gzipWriterPool.Get().(*gzip.Writer)
 	w.gz.Reset(w.ResponseWriter)
@@ -196,6 +222,29 @@ func (w *gzipResponseWriter) close() {
 // problemInterceptor.Unwrap for why a middleware that omits this silently
 // strips capabilities from everything behind it.
 func (w *gzipResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// weakenETag downgrades a strong entity-tag to a weak one when the body is
+// about to be compressed.
+//
+// RFC 9110 §8.8.3 requires a strong validator to differ between representations
+// that differ byte-for-byte, and the gzipped and identity forms of a response
+// do. Serving both under the same strong tag lets an intermediary that keys on
+// ETag alone hand a gzipped body to a client that asked for identity. Vary:
+// Accept-Encoding already makes a conforming shared cache key them separately,
+// so this is defence against the non-conforming middlebox rather than a live
+// bug — and it is what nginx does for exactly the same reason.
+//
+// Weakening rather than deriving a second tag keeps the two representations
+// interchangeable for the conditional GETs this API actually serves: those
+// compare content hashes of read-only data, where weak comparison is the
+// correct semantics anyway (see checkNotModified in api.go).
+func weakenETag(header http.Header) {
+	tag := header.Get("ETag")
+	if tag == "" || strings.HasPrefix(tag, "W/") {
+		return
+	}
+	header.Set("ETag", "W/"+tag)
+}
 
 // Compress wraps h so compressible responses are gzipped for clients that
 // accept it.
