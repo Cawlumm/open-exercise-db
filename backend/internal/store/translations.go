@@ -89,13 +89,6 @@ func (s *TranslationStore) GetForRevision(ctx context.Context, revisionID, local
 	return result, nil
 }
 
-// ListLocalesForExercise returns one summary per locale that has an
-// approved translation of exerciseID's *current* revision — not any
-// revision, since a translation of an older superseded revision isn't
-// something a consumer of the live exercise needs to see. Complete means
-// the translation row itself supplies a non-empty name and a non-empty
-// instructions array; it does not consider English fallback, since
-// completeness is about how much of that locale's own translation exists.
 // CountLocalesForExercise returns how many locales have an approved
 // translation of exerciseID's current revision, ignoring pagination. The
 // WHERE clause is kept identical to ListLocalesForExercise's below; if the
@@ -114,6 +107,13 @@ func (s *TranslationStore) CountLocalesForExercise(ctx context.Context, exercise
 	return total, nil
 }
 
+// ListLocalesForExercise returns one page of summaries, one per locale that
+// has an approved translation of exerciseID's *current* revision — not any
+// revision, since a translation of an older superseded revision isn't
+// something a consumer of the live exercise needs to see. Complete means the
+// translation row itself supplies a non-empty name and a non-empty
+// instructions array; it does not consider English fallback, since
+// completeness is about how much of that locale's own translation exists.
 func (s *TranslationStore) ListLocalesForExercise(ctx context.Context, exerciseID string, limit, offset int) ([]model.TranslationSummary, error) {
 	// t.locale is unique per revision, so ORDER BY locale is deterministic
 	// across pages without a tiebreak column.
