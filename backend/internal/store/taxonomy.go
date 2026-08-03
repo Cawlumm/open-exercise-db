@@ -15,14 +15,9 @@ type TaxonomyStore struct {
 	pool *pgxpool.Pool
 }
 
-// ListTerms returns every term in facet, with its label resolved for
-// locale — falling back to the English label, and then to the slug itself
-// if even English is missing, so a gap in seed translations degrades to a
-// readable value instead of a NULL scan failure. Per
-// docs/PHASE1_BUILD_PLAN.md's WO-1 status note, terms are keyed on
-// (facet, slug), never slug alone, since slugs like "other" recur across
-// facets.
-// CountTerms returns how many terms facet holds, ignoring pagination.
+// CountTerms returns how many terms facet holds, ignoring pagination. Its
+// WHERE clause is kept identical to ListTerms' below; if the two diverge, the
+// reported Total stops describing the page it is attached to.
 func (s *TaxonomyStore) CountTerms(ctx context.Context, facet string) (int, error) {
 	var total int
 	err := s.pool.QueryRow(ctx, `
@@ -33,6 +28,13 @@ func (s *TaxonomyStore) CountTerms(ctx context.Context, facet string) (int, erro
 	return total, nil
 }
 
+// ListTerms returns one page of facet's terms, with each label resolved for
+// locale — falling back to the English label, and then to the slug itself if
+// even English is missing, so a gap in seed translations degrades to a
+// readable value instead of a NULL scan failure. Per
+// docs/PHASE1_BUILD_PLAN.md's WO-1 status note, terms are keyed on
+// (facet, slug), never slug alone, since slugs like "other" recur across
+// facets.
 func (s *TaxonomyStore) ListTerms(ctx context.Context, facet, locale string, limit, offset int) ([]model.TaxonomyTerm, error) {
 	if locale == "" {
 		locale = englishLocale
@@ -75,13 +77,6 @@ func (s *TaxonomyStore) ListTerms(ctx context.Context, facet, locale string, lim
 	return terms, nil
 }
 
-// ListLocales returns every locale with translated content anywhere in the
-// dataset — the union of exercise_translations and taxonomy_term_translations
-// locales — plus "en" unconditionally, since English is the base language
-// written directly onto exercise_revisions and taxonomy_term_translations'
-// own seed rows rather than appearing as a translation row itself. Backs
-// GET /meta/locales (docs/DESIGN.md), added in WO-3: none of WO-2's read
-// paths needed to enumerate locales, only resolve a single requested one.
 // localeUnion is the set every locale query below draws from, kept in one
 // place so CountLocales and ListLocales can never disagree about what
 // counts as a locale — a Total computed from a different set than the page
@@ -93,7 +88,9 @@ const localeUnion = `
 	UNION
 	SELECT $1`
 
-// CountLocales returns how many locales exist, ignoring pagination.
+// CountLocales returns how many locales localeUnion yields, ignoring
+// pagination. Sharing localeUnion with ListLocales is what keeps this Total
+// describing the page it is attached to.
 func (s *TaxonomyStore) CountLocales(ctx context.Context) (int, error) {
 	var total int
 	query := `SELECT count(*) FROM (` + localeUnion + `) AS all_locales`
@@ -103,6 +100,14 @@ func (s *TaxonomyStore) CountLocales(ctx context.Context) (int, error) {
 	return total, nil
 }
 
+// ListLocales returns one page of the locales with translated content anywhere
+// in the dataset — the union of exercise_translations and
+// taxonomy_term_translations locales — plus "en" unconditionally, since
+// English is the base language written directly onto exercise_revisions and
+// taxonomy_term_translations' own seed rows rather than appearing as a
+// translation row itself. Backs GET /meta/locales (docs/DESIGN.md), added in
+// WO-3: none of WO-2's read paths needed to enumerate locales, only resolve a
+// single requested one.
 func (s *TaxonomyStore) ListLocales(ctx context.Context, limit, offset int) ([]model.Locale, error) {
 	// English sorts first regardless of page, then the rest alphabetically.
 	// UNION already de-duplicates, so locale is unique and the ordering is
