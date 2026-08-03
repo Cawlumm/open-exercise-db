@@ -84,8 +84,14 @@ type ListExercisesInput struct {
 	Equipment   string `query:"equipment" doc:"Taxonomy slug filter; see GET /meta/equipment"`
 	Category    string `query:"category" doc:"Taxonomy slug filter; see GET /meta/categories"`
 	Mechanic    string `query:"mechanic" doc:"Taxonomy slug filter: compound or isolation"`
-	Level       string `query:"level" doc:"Taxonomy slug filter: beginner, intermediate, or advanced"`
-	Locale      string `query:"locale" doc:"BCP-47 locale for name/aliases/instructions; falls back to English per-field when untranslated"`
+	// "expert", not "advanced" — the seeded vocabulary comes from
+	// free-exercise-db, which uses expert as its top level. This doc said
+	// "advanced" and no such term has ever existed, so /docs and the generated
+	// OpenAPI spec were both telling callers to send a value guaranteed to
+	// match nothing (and, since filter values are now validated, to be
+	// rejected outright).
+	Level  string `query:"level" doc:"Taxonomy slug filter: beginner, intermediate, or expert"`
+	Locale string `query:"locale" doc:"BCP-47 locale for name/aliases/instructions; falls back to English per-field when untranslated"`
 	PageParams
 }
 
@@ -227,6 +233,10 @@ func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, inp
 	// exercises.go's ExerciseFilter defers the ceiling back to the huma tag
 	// that a direct call never applies. Every sibling handler already routed
 	// through Normalize; this one silently opted out during the refactor.
+	if err := validateTaxonomyFilters(ctx, s, input); err != nil {
+		return nil, err
+	}
+
 	page, perPage := input.Normalize()
 	filter := store.ExerciseFilter{
 		Q:           input.Q,
@@ -256,7 +266,7 @@ func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, inp
 	// package.
 	out.Body.Exercises = make([]contract.Exercise, 0, len(exercises))
 	for _, ex := range exercises {
-		resolved, err := resolveExercise(ctx, s, ex, input.Locale, imageBaseURL)
+		resolved, err := resolveExercise(ctx, s, ex, normalizeLocale(input.Locale), imageBaseURL)
 		if err != nil {
 			return nil, mapStoreError(err, "exercise not found")
 		}
@@ -278,7 +288,7 @@ func GetExercise(ctx context.Context, s *store.Store, imageBaseURL string, input
 		return nil, mapStoreError(err, "exercise not found")
 	}
 
-	resolved, err := resolveExercise(ctx, s, ex, input.Locale, imageBaseURL)
+	resolved, err := resolveExercise(ctx, s, ex, normalizeLocale(input.Locale), imageBaseURL)
 	if err != nil {
 		return nil, mapStoreError(err, "exercise not found")
 	}

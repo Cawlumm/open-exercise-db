@@ -15,6 +15,75 @@ type TaxonomyStore struct {
 	pool *pgxpool.Pool
 }
 
+// FacetSlug is one (facet, slug) pair — the only globally meaningful way to
+// name a taxonomy term, since slugs are unique per facet rather than globally
+// (see the UNIQUE (facet, slug) constraint and its comment in the schema).
+type FacetSlug struct {
+	Facet string
+	Slug  string
+}
+
+// UnknownSlugs returns the subset of pairs that name no taxonomy term.
+//
+// Exists so a filter value that matches nothing can be told apart from a filter
+// value that is simply spelled wrong. Both produce an empty result set, and
+// without this the API cannot distinguish them — so `?muscle_group=Chest`
+// (right idea, wrong case) answered 200 with zero exercises, exactly like a
+// legitimate query for a combination nothing satisfies.
+//
+// One query for every pair rather than one per filter: a list request can carry
+// five taxonomy filters at once, and five extra round trips on the hot search
+// path to validate input is a worse trade than the unnest below.
+func (s *TaxonomyStore) UnknownSlugs(ctx context.Context, pairs []FacetSlug) ([]FacetSlug, error) {
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+
+	facets := make([]string, len(pairs))
+	slugs := make([]string, len(pairs))
+	for i, p := range pairs {
+		facets[i] = p.Facet
+		slugs[i] = p.Slug
+	}
+
+	// The second EXISTS makes this fail *open* on a facet with no vocabulary at
+	// all. Without it, an unseeded or partially-seeded taxonomy table means
+	// every value is "unknown" and every filtered request is rejected — so a
+	// deployment that had merely skipped taxonomy seeding would answer 422 to
+	// all filtering and look comprehensively broken, rather than degrading to
+	// the unvalidated behavior it had before. Validation is only meaningful
+	// against a vocabulary that exists; where one does not, the caller gets the
+	// benefit of the doubt.
+	rows, err := s.pool.Query(ctx, `
+		SELECT w.facet, w.slug
+		FROM unnest($1::text[], $2::text[]) AS w(facet, slug)
+		WHERE NOT EXISTS (
+			SELECT 1 FROM taxonomy_terms t
+			WHERE t.facet = w.facet AND t.slug = w.slug
+		)
+		AND EXISTS (
+			SELECT 1 FROM taxonomy_terms t
+			WHERE t.facet = w.facet
+		)`, facets, slugs)
+	if err != nil {
+		return nil, fmt.Errorf("check taxonomy slugs: %w", err)
+	}
+	defer rows.Close()
+
+	var unknown []FacetSlug
+	for rows.Next() {
+		var fs FacetSlug
+		if err := rows.Scan(&fs.Facet, &fs.Slug); err != nil {
+			return nil, fmt.Errorf("scan unknown taxonomy slug: %w", err)
+		}
+		unknown = append(unknown, fs)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate unknown taxonomy slugs: %w", err)
+	}
+	return unknown, nil
+}
+
 // CountTerms returns how many terms facet holds, ignoring pagination. Its
 // WHERE clause is kept identical to ListTerms' below; if the two diverge, the
 // reported Total stops describing the page it is attached to.

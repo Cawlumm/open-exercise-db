@@ -109,6 +109,15 @@ func main() {
 	humaConfig := huma.DefaultConfig("open-exercise-db API", "1.0.0")
 	humaConfig.OpenAPIPath = "/api/v1/openapi"
 	humaConfig.DocsPath = "/docs"
+	// An unrecognized query parameter is a client bug, and silently ignoring
+	// one produces the worst possible response: a 200 carrying a confidently
+	// wrong answer. `?search=bench` (the obvious guess for `q`), `?limit=5`
+	// (the obvious guess for `per_page`), and `?muscleGroup=chest` (camelCase
+	// instead of snake_case) each returned all 873 exercises, and nothing in
+	// the response told the caller their filter had been dropped — the failure
+	// only shows up later as "the API ignores my search". Rejecting instead
+	// turns each of those into a 422 naming the offending parameter.
+	humaConfig.RejectUnknownQueryParameters = true
 	humaConfig.Info.License = &huma.License{Name: "MIT", Identifier: "MIT"} // docs/DESIGN.md -> Licensing: code is MIT (data is CC0, tracked separately)
 	// Servers is informational for spec consumers/linters (redocly's
 	// no-empty-servers rule flags its absence); operation paths already
@@ -128,7 +137,12 @@ func main() {
 		// alone and rewrites only the plain-text bodies ServeMux itself
 		// produces — see internal/api/errors.go for why no route-shaped fix
 		// exists.
-		Handler: api.ProblemErrors(mux),
+		//
+		// CORS is outermost so a preflight is answered before routing can 405
+		// it, and so the cross-origin headers are present on error responses
+		// too — a browser that cannot read a 429 is a browser that cannot obey
+		// docs/API_POLICY.md's back-off rules.
+		Handler: api.CORS(api.ProblemErrors(mux)),
 	}
 
 	serverErr := make(chan error, 1)

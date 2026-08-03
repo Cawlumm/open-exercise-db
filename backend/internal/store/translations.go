@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -52,13 +53,26 @@ func (s *TranslationStore) GetForRevision(ctx context.Context, revisionID, local
 		return result, nil
 	}
 
+	// Match the exact locale first, then its base language: a caller asking for
+	// es-MX should get Spanish rather than English when only "es" is
+	// translated, which is the whole point of a region subtag being a
+	// refinement rather than a different language. Without this the exact-match
+	// lookup missed and every regional locale fell all the way back to English,
+	// silently — es-MX, pt-BR and en-GB are the forms real Accept-Language
+	// headers actually carry, so the common case was the broken one.
+	//
+	// ORDER BY puts an exact match ahead of the base-language row so the more
+	// specific translation always wins when both exist; LIMIT 1 then takes it.
+	var servedLocale string
 	var t model.Translation
 	err = s.pool.QueryRow(ctx, `
-		SELECT name, aliases, instructions, origin
+		SELECT name, aliases, instructions, origin, locale
 		FROM exercise_translations
-		WHERE revision_id = $1 AND locale = $2 AND status = 'approved'`,
-		revisionID, locale,
-	).Scan(&t.Name, &t.Aliases, &t.Instructions, &t.Origin)
+		WHERE revision_id = $1 AND status = 'approved' AND locale IN ($2, $3)
+		ORDER BY (locale = $2) DESC
+		LIMIT 1`,
+		revisionID, locale, baseLanguage(locale),
+	).Scan(&t.Name, &t.Aliases, &t.Instructions, &t.Origin, &servedLocale)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// No translation row at all for this locale: every field stays
@@ -70,19 +84,23 @@ func (s *TranslationStore) GetForRevision(ctx context.Context, revisionID, local
 
 	machineOrigin := t.Origin == "machine"
 
+	// servedLocale, not the requested one: with base-language fallback these
+	// legitimately differ (asked es-MX, served es), and the per-field *_locale
+	// fields exist precisely so a client can see which. Reporting the requested
+	// locale here would claim a regional translation that does not exist.
 	if t.Name != "" {
 		result.Name = t.Name
-		result.NameLocale = locale
+		result.NameLocale = servedLocale
 		result.NameMachineOrigin = machineOrigin
 	}
 	if len(t.Aliases) > 0 {
 		result.Aliases = t.Aliases
-		result.AliasesLocale = locale
+		result.AliasesLocale = servedLocale
 		result.AliasesMachineOrigin = machineOrigin
 	}
 	if len(t.Instructions) > 0 {
 		result.Instructions = t.Instructions
-		result.InstructionsLocale = locale
+		result.InstructionsLocale = servedLocale
 		result.InstructionsMachineOrigin = machineOrigin
 	}
 
@@ -143,4 +161,15 @@ func (s *TranslationStore) ListLocalesForExercise(ctx context.Context, exerciseI
 	}
 
 	return summaries, nil
+}
+
+// baseLanguage returns the language subtag of a BCP-47 tag: "es-MX" -> "es".
+// A tag with no region is its own base, and returning it unchanged makes the
+// IN ($2, $3) lookup above degenerate to a plain exact match rather than
+// needing a separate query for the two cases.
+func baseLanguage(locale string) string {
+	if i := strings.IndexByte(locale, '-'); i > 0 {
+		return locale[:i]
+	}
+	return locale
 }

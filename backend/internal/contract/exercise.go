@@ -28,7 +28,7 @@ type Exercise struct {
 	Equipment        string   `json:"equipment" doc:"Taxonomy slug; see GET /meta/equipment"`
 	Mechanic         *string  `json:"mechanic,omitempty" doc:"compound or isolation"`
 	Force            *string  `json:"force,omitempty" doc:"push, pull, or static"`
-	Level            *string  `json:"level,omitempty" doc:"beginner, intermediate, or advanced"`
+	Level            *string  `json:"level,omitempty" doc:"beginner, intermediate, or expert"`
 	Images           []Image  `json:"images" doc:"Re-hosted images for this exercise, each carrying enough to fetch and render it — see the Image schema"`
 	VideoIDs         []string `json:"video_ids"`
 	License          *string  `json:"license,omitempty" doc:"Per-revision license, e.g. Unlicense or CC-BY-SA-4.0 — provenance is honest per-exercise rather than assuming one license for the whole export"`
