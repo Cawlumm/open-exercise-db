@@ -54,8 +54,7 @@ func TestListExercises_NoMatchesSerializesAsEmptyArray(t *testing.T) {
 	// made `null` here a client-crashing default rather than a cosmetic wart.
 	out, err := ListExercises(ctx, s, "", &ListExercisesInput{
 		MuscleGroup: "no-such-muscle-group",
-		Page:        1,
-		PerPage:     50,
+		PageParams:  PageParams{Page: 1, PerPage: 50},
 	})
 	if err != nil {
 		t.Fatalf("ListExercises: %v", err)
@@ -74,8 +73,7 @@ func TestListExercises_PagePastEndSerializesAsEmptyArray(t *testing.T) {
 	// handler takes a different path to the same empty page. A paginating
 	// consumer walking to the end hits this one.
 	out, err := ListExercises(ctx, s, "", &ListExercisesInput{
-		Page:    99999,
-		PerPage: 50,
+		PageParams: PageParams{Page: 99999, PerPage: 50},
 	})
 	if err != nil {
 		t.Fatalf("ListExercises: %v", err)
@@ -99,7 +97,9 @@ func TestListExerciseTranslations_NoTranslationsSerializesAsEmptyArray(t *testin
 	if err != nil {
 		t.Fatalf("ListExerciseTranslations: %v", err)
 	}
-	assertJSONArrayNotNull(t, out.Body, "locales")
+	// "translations", not "locales" — /meta/locales already uses that name for
+	// a different item type (docs/CONVENTIONS.md section 3a).
+	assertJSONArrayNotNull(t, out.Body, "translations")
 }
 
 func TestListTaxonomyTerms_EmptyFacetSerializesAsEmptyArray(t *testing.T) {

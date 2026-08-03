@@ -213,6 +213,103 @@ Conventions:
 
 ---
 
+## 3a. Payload standard
+
+One contract for every endpoint, so a consumer learns the envelope once. Enforced by
+`internal/api/payloadstandard_test.go` — a new collection endpoint that skips the envelope
+fails there, not in review.
+
+### Single resource: bare, no envelope
+
+```jsonc
+GET /api/v1/exercises/{id}
+{ "id": "…", "slug": "…", "muscle_group": "…", … }   // the object itself
+```
+
+**Not** `{"exercise": {…}}`. This was researched rather than assumed: of the Go APIs this
+project benchmarks against, **Kubernetes, Gitea/Forgejo, HashiCorp Nomad and Miniflux all
+return single resources unwrapped**. The one surveyed API that wraps is Open Food Facts —
+and it wraps because it answers `HTTP 200` with `{"status": "failure"}` in the body, so it
+*needs* a body-level status field. This API uses real status codes and `problem+json`
+instead, so the envelope would carry cost with none of the benefit.
+
+### Collections: named key + shared pagination block
+
+```jsonc
+GET /api/v1/exercises?page=2&per_page=50
+{
+  "exercises": [ … ],   // named for its contents, never "data" or "items"
+  "total": 873,         // across all pages, ignoring pagination
+  "page": 2,
+  "per_page": 50
+}
+```
+
+- The collection field is **named for what it holds** (`exercises`, `revisions`, `terms`,
+  `translations`, `locales`) and is **always an array, never `null`** — build it with
+  `make([]T, 0, n)`, never by appending onto a nil slice. `encoding/json` renders a nil slice
+  as `null`, and a consumer calling `.map()` on the first search that matches nothing crashes.
+  This shipped once; see `internal/api/emptycollections_test.go`.
+- A field name means **one shape across the whole API**. `/exercises/{id}/translations`
+  returns `translations`, not `locales`, because `/meta/locales` already returns `locales`
+  with a different item type.
+- Pagination is the embedded `api.Pagination` / `api.PageParams` pair (`internal/api/pagination.go`),
+  never hand-rolled per endpoint. **Every** collection carries it, including ones too small to
+  need it today — a uniform contract beats a per-endpoint lookup, and taxonomy is exactly the
+  table that grows quietly once contributions open.
+- Pagination happens **in SQL** (`LIMIT`/`OFFSET` + a matching `Count…` method), never by
+  slicing in the handler. The `Count` query's `WHERE` must match the list query's exactly, or
+  `total` stops describing the page attached to it.
+- **`ORDER BY` must be deterministic.** A non-unique sort key needs a tiebreak (`created_at
+  DESC, id DESC`); without one Postgres may order two rows differently between the query for
+  page 1 and the query for page 2, silently duplicating or dropping a row across the boundary.
+
+Offset pagination rather than Kubernetes-style cursors: collections here are small, ordered by
+a stable key, and served from a CDN. A cursor's advantage — stability under concurrent
+insertion — costs opaque tokens that break the plain-URL caching this API's performance
+story rests on.
+
+### Errors: RFC 9457 + a stable `type`
+
+```jsonc
+HTTP/1.1 404 Not Found
+Content-Type: application/problem+json
+{
+  "type": "https://openexercisedb.org/errors/not-found",  // switch on THIS
+  "title": "Not Found",
+  "status": 404,
+  "detail": "exercise not found",                          // prose; may be reworded
+  "errors": [ { "message": "…", "location": "query.per_page", "value": 101 } ]
+}
+```
+
+- **`type` is the contract; `detail` is not.** `detail` is prose for humans and will be
+  reworded — a client branching on it breaks silently. This mirrors Kubernetes carrying
+  `Status.Reason` (machine-readable) beside `Status.Message` (human).
+- Types are declared as constants in `internal/api/errors.go` so the full set stays
+  enumerable from one place, and are applied by status in an override of `huma.NewError`.
+  That override is what makes huma's *own* validation failures carry a type too — a
+  per-call-site scheme only covers what someone remembered to annotate.
+- **Every** non-2xx response is `application/problem+json`, including unknown routes
+  (`api.NotFoundHandler`, mounted on `/` in `cmd/api-server`). Otherwise a typo'd path —
+  a common first contact with this API — is the one response not in the documented format.
+- Real HTTP status codes, always. Never `200` with a failure in the body.
+
+### Requests
+
+- **Reads take query parameters only.** No `GET` in this API has a request body.
+- **Writes (Phase 2) take a bare resource body**, mirroring the bare single-resource
+  response — `POST /exercises` takes exercise fields at the top level, not
+  `{"exercise": {…}}`. Symmetry with the read shape is the point: what you `GET` is what
+  you `POST`.
+- **Write responses may add `warnings[]`** alongside the created resource, using the same
+  item shape as the error `errors[]` array. This is the one idea worth taking from Open Food
+  Facts' envelope: a submission can succeed *and* have something worth telling the
+  contributor ("`muscle_group: pecs` was normalized to `chest`"). Warnings never change the
+  status code — a 201 with warnings is still a success.
+
+---
+
 ## 4. Store layer
 
 - **One file per aggregate**: `store/exercises.go`, `store/submissions.go`,

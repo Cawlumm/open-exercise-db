@@ -242,16 +242,19 @@ OpenAPI 3.1 spec generated from Go types by [huma v2](https://huma.rocks/) from 
 served at `/api/v1/openapi.json` with a docs UI at `/docs`, on a versioned path so early
 consumers (lyftr included) aren't broken by iteration. Generating the spec from the handler
 input/output types is what makes "API-first" enforceable — the spec cannot drift from the
-code. See [`CONVENTIONS.md`](CONVENTIONS.md) section 3 for the handler patterns.
+code. See [`CONVENTIONS.md`](CONVENTIONS.md) section 3 for the handler patterns, and
+section 3a for the payload standard every endpoint below conforms to: bare single resources,
+named collection key + `total`/`page`/`per_page` on every list, and RFC 9457 problem details
+carrying a stable `type` URI on every error.
 
 ```
 # Read — public, no auth
 GET /exercises?q=&muscle_group=&equipment=&category=&mechanic=&level=&locale=&page=&per_page=
 GET /exercises/{id}?locale=                 # falls back to English if no translation
-GET /exercises/{id}/revisions
-GET /exercises/{id}/translations
+GET /exercises/{id}/revisions?page=&per_page=
+GET /exercises/{id}/translations?page=&per_page=
 GET /exercises/export                       # pre-generated static JSON, CDN-served
-GET /meta/muscle-groups | /equipment | /categories | /locales   # ?locale= for translated labels
+GET /meta/muscle-groups | /equipment | /categories | /locales   # ?locale=, ?page=, ?per_page=
 GET /images/{id}                            # re-hosted image bytes — see Images below
 
 # Write — GitHub-OAuth JWT required

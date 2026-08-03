@@ -22,11 +22,29 @@ type TaxonomyStore struct {
 // docs/PHASE1_BUILD_PLAN.md's WO-1 status note, terms are keyed on
 // (facet, slug), never slug alone, since slugs like "other" recur across
 // facets.
-func (s *TaxonomyStore) ListTerms(ctx context.Context, facet, locale string) ([]model.TaxonomyTerm, error) {
+// CountTerms returns how many terms facet holds, ignoring pagination.
+func (s *TaxonomyStore) CountTerms(ctx context.Context, facet string) (int, error) {
+	var total int
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM taxonomy_terms WHERE facet = $1`, facet).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("count taxonomy terms for facet %s: %w", facet, err)
+	}
+	return total, nil
+}
+
+func (s *TaxonomyStore) ListTerms(ctx context.Context, facet, locale string, limit, offset int) ([]model.TaxonomyTerm, error) {
 	if locale == "" {
 		locale = englishLocale
 	}
 
+	// Every facet is small today (17 muscle groups, 13 equipment), so this
+	// pagination buys nothing yet. It exists so the endpoint's contract
+	// matches every other collection in the API rather than being a special
+	// case a client has to learn — and because taxonomy is exactly the kind
+	// of table that grows quietly once contributions open in Phase 2.
+	// t.slug ASC is already unique within a facet (UNIQUE (facet, slug)), so
+	// the ordering is deterministic across pages without a tiebreak column.
 	rows, err := s.pool.Query(ctx, `
 		SELECT t.id, t.facet, t.slug,
 		       COALESCE(loc.label, en.label, t.slug) AS label,
@@ -35,7 +53,8 @@ func (s *TaxonomyStore) ListTerms(ctx context.Context, facet, locale string) ([]
 		LEFT JOIN taxonomy_term_translations loc ON loc.term_id = t.id AND loc.locale = $2
 		LEFT JOIN taxonomy_term_translations en ON en.term_id = t.id AND en.locale = 'en'
 		WHERE t.facet = $1
-		ORDER BY t.slug ASC`, facet, locale)
+		ORDER BY t.slug ASC
+		LIMIT $3 OFFSET $4`, facet, locale, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list taxonomy terms for facet %s: %w", facet, err)
 	}
@@ -63,16 +82,38 @@ func (s *TaxonomyStore) ListTerms(ctx context.Context, facet, locale string) ([]
 // own seed rows rather than appearing as a translation row itself. Backs
 // GET /meta/locales (docs/DESIGN.md), added in WO-3: none of WO-2's read
 // paths needed to enumerate locales, only resolve a single requested one.
-func (s *TaxonomyStore) ListLocales(ctx context.Context) ([]model.Locale, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT locale FROM (
-			SELECT locale FROM exercise_translations WHERE status = 'approved'
-			UNION
-			SELECT locale FROM taxonomy_term_translations
-			UNION
-			SELECT $1
+// localeUnion is the set every locale query below draws from, kept in one
+// place so CountLocales and ListLocales can never disagree about what
+// counts as a locale — a Total computed from a different set than the page
+// it describes is worse than no Total at all.
+const localeUnion = `
+	SELECT locale FROM exercise_translations WHERE status = 'approved'
+	UNION
+	SELECT locale FROM taxonomy_term_translations
+	UNION
+	SELECT $1`
+
+// CountLocales returns how many locales exist, ignoring pagination.
+func (s *TaxonomyStore) CountLocales(ctx context.Context) (int, error) {
+	var total int
+	query := `SELECT count(*) FROM (` + localeUnion + `) AS all_locales`
+	if err := s.pool.QueryRow(ctx, query, englishLocale).Scan(&total); err != nil {
+		return 0, fmt.Errorf("count locales: %w", err)
+	}
+	return total, nil
+}
+
+func (s *TaxonomyStore) ListLocales(ctx context.Context, limit, offset int) ([]model.Locale, error) {
+	// English sorts first regardless of page, then the rest alphabetically.
+	// UNION already de-duplicates, so locale is unique and the ordering is
+	// deterministic across pages without a tiebreak.
+	query := `
+		SELECT locale FROM (` + localeUnion + `
 		) AS all_locales
-		ORDER BY (locale = $1) DESC, locale ASC`, englishLocale)
+		ORDER BY (locale = $1) DESC, locale ASC
+		LIMIT $2 OFFSET $3`
+
+	rows, err := s.pool.Query(ctx, query, englishLocale, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list locales: %w", err)
 	}
