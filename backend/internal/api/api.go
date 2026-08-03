@@ -51,6 +51,9 @@ const cacheControl = "public, max-age=300, stale-while-revalidate=86400"
 // and User-Agent policy apply uniformly to every GET this package exposes,
 // not opted into per-route.
 func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter *ratelimit.Limiter, mediaStore media.Store, imageBaseURL string) {
+	// Ahead of the rate limiter: a malformed request should be cheap to reject
+	// and should not consume a caller's budget for the round trip.
+	hapi.UseMiddleware(rejectNulBytesMiddleware(hapi))
 	hapi.UseMiddleware(rateLimitMiddleware(hapi, limiter))
 
 	// registerExportRoutes intentionally comes before registerExerciseRoutes.

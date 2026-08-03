@@ -142,7 +142,11 @@ func main() {
 		// it, and so the cross-origin headers are present on error responses
 		// too — a browser that cannot read a 429 is a browser that cannot obey
 		// docs/API_POLICY.md's back-off rules.
-		Handler: api.CORS(api.ProblemErrors(mux)),
+		// Compress sits inside CORS and outside ProblemErrors: it must see the
+		// final body — including the problem+json ProblemErrors substitutes for
+		// ServeMux's plain-text errors — while CORS headers stay plainly
+		// readable on the wire whatever encoding the body ends up in.
+		Handler: api.CORS(api.Compress(api.ProblemErrors(mux))),
 	}
 
 	serverErr := make(chan error, 1)

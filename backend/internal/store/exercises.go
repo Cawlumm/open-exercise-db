@@ -282,10 +282,22 @@ func buildExerciseWhere(filter ExerciseFilter) (string, []any) {
 	}
 
 	if filter.Q != "" {
-		args = append(args, "%"+filter.Q+"%")
+		// The term is escaped before being wrapped in wildcards, and the
+		// pattern declares its escape character explicitly.
+		//
+		// Without this, LIKE metacharacters in user input were live: `?q=%`
+		// built the pattern `%%%`, which matches every row, so a caller
+		// searching for a literal percent sign received all 873 exercises as a
+		// confident 200. `?q=_` behaved the same way (`%_%` matches anything at
+		// least one character long), and a real term like "100%" silently
+		// matched far more than it should. Parameterization already made this
+		// safe from injection — it was never a security hole — but safe and
+		// correct are different properties, and this wrong answer looked
+		// exactly like a right one.
+		args = append(args, "%"+escapeLikePattern(filter.Q)+"%")
 		n := len(args)
 		conditions = append(conditions, fmt.Sprintf(
-			"(r.name ILIKE $%d OR EXISTS (SELECT 1 FROM unnest(r.aliases) AS alias WHERE alias ILIKE $%d))",
+			`(r.name ILIKE $%d ESCAPE '\' OR EXISTS (SELECT 1 FROM unnest(r.aliases) AS alias WHERE alias ILIKE $%d ESCAPE '\'))`,
 			n, n,
 		))
 	}
@@ -296,6 +308,22 @@ func buildExerciseWhere(filter ExerciseFilter) (string, []any) {
 	addEq("r.level", filter.Level)
 
 	return strings.Join(conditions, " AND "), args
+}
+
+// escapeLikePattern neutralizes the three characters LIKE treats specially, so
+// a search term is matched literally.
+//
+// The backslash must be escaped first: doing it after would also escape the
+// backslashes this function itself just introduced, turning `%` into `\\%` —
+// a literal backslash followed by a live wildcard, which is both wrong and
+// worse than doing nothing. Pairs with the `ESCAPE '\'` clause on the ILIKE;
+// Postgres defaults to backslash anyway, but naming it means the pattern keeps
+// working if standard_conforming_strings or a future default ever changes.
+func escapeLikePattern(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "%", `\%`)
+	s = strings.ReplaceAll(s, "_", `\_`)
+	return s
 }
 
 func scanExerciseWithRevision(row rowScanner) (model.Exercise, error) {

@@ -10,6 +10,8 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Cawlumm/open-exercise-db/internal/store"
 )
 
 // These tests cover a category the rest of the suite did not: what a caller who
@@ -326,6 +328,95 @@ func seedVocabulary(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	for facet, slugs := range vocab {
 		for _, slug := range slugs {
 			seedTaxonomyTerm(t, ctx, pool, facet, slug, map[string]string{"en": slug})
+		}
+	}
+}
+
+// TestSearchTreatsWildcardsLiterally covers the second round of misuse probing.
+//
+// The search term was interpolated straight into a LIKE pattern, so LIKE's
+// metacharacters were live in user input: `?q=%` produced the pattern `%%%` and
+// returned all 873 exercises, and `?q=_` returned everything at least one
+// character long. Parameterization already prevented injection — this was never
+// a security hole — but a search for a literal "%" answering with the entire
+// dataset is a confidently wrong 200, which is the failure mode this project
+// keeps finding.
+func TestSearchTreatsWildcardsLiterally(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+
+	seedExercise(t, ctx, pool, exerciseFixture{
+		slug: "plain-press", name: "Plain Press",
+		muscleGroup: "chest", equipment: "barbell", category: "strength",
+	})
+	// Names carrying the metacharacters themselves, so "matched literally" is
+	// distinguishable from "matched nothing".
+	seedExercise(t, ctx, pool, exerciseFixture{
+		slug: "hundred-percent", name: "100% Effort Row",
+		muscleGroup: "chest", equipment: "barbell", category: "strength",
+	})
+	seedExercise(t, ctx, pool, exerciseFixture{
+		slug: "under-score", name: "Under_score Curl",
+		muscleGroup: "chest", equipment: "barbell", category: "strength",
+	})
+
+	total := func(t *testing.T, q string) int {
+		t.Helper()
+		out, err := ListExercises(ctx, s, "", &ListExercisesInput{Q: q})
+		if err != nil {
+			t.Fatalf("ListExercises(q=%q): %v", q, err)
+		}
+		return out.Body.Total
+	}
+
+	// A bare wildcard must match only the rows that literally contain it, not
+	// every row in the table.
+	if got := total(t, "%"); got != 1 {
+		t.Errorf("q=%% matched %d exercises, want 1 (only \"100%% Effort Row\") — "+
+			"a literal percent must not behave as a wildcard", got)
+	}
+	if got := total(t, "_"); got != 1 {
+		t.Errorf("q=_ matched %d exercises, want 1 (only \"Under_score Curl\")", got)
+	}
+	// A term a user would plausibly type, where the metacharacter is incidental.
+	if got := total(t, "100%"); got != 1 {
+		t.Errorf("q=100%% matched %d, want 1", got)
+	}
+	// Wildcards the user typed around a real word are now literal, so they
+	// match nothing rather than silently working.
+	if got := total(t, "%Plain%"); got != 0 {
+		t.Errorf("q=%%Plain%% matched %d, want 0 — the wildcards are part of the search term now", got)
+	}
+	// Ordinary search is unaffected, and stays case-insensitive.
+	if got := total(t, "plain"); got != 1 {
+		t.Errorf("q=plain matched %d, want 1", got)
+	}
+	if got := total(t, "PLAIN"); got != 1 {
+		t.Errorf("q=PLAIN matched %d, want 1 — search must stay case-insensitive", got)
+	}
+	// A backslash must not escape the character after it, nor break the query.
+	if got := total(t, `\`); got != 0 {
+		t.Errorf(`q=\ matched %d, want 0`, got)
+	}
+}
+
+func TestEscapeLikePattern_EscapesBackslashFirst(t *testing.T) {
+	// Order matters and is easy to get backwards: escaping % before \ would
+	// re-escape the backslashes just introduced, turning "%" into a literal
+	// backslash followed by a still-live wildcard — worse than not escaping at
+	// all.
+	cases := map[string]string{
+		"plain": "plain",
+		"%":     `\%`,
+		"_":     `\_`,
+		`\`:     `\\`,
+		`\%`:    `\\\%`,
+		"100%":  `100\%`,
+		"a_b%c": `a\_b\%c`,
+	}
+	for in, want := range cases {
+		if got := store.StoreEscapeLikePattern(in); got != want {
+			t.Errorf("escapeLikePattern(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
