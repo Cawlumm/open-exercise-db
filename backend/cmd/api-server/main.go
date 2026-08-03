@@ -119,16 +119,16 @@ func main() {
 	hapi := humago.New(mux, humaConfig)
 	api.Register(hapi, stores, exportCache, limiter, mediaStore, cfg.ImageBaseURL)
 
-	// Catch-all for paths no operation claims. Registered last and on the
-	// bare "/" pattern, which Go 1.22+'s ServeMux only selects when nothing
-	// more specific matches — so this cannot shadow a real route. Without it
-	// a typo'd path gets net/http's text/plain "404 page not found", the one
-	// response in this API that isn't problem+json (see internal/api/errors.go).
-	mux.Handle("/", api.NotFoundHandler())
-
 	server := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: mux,
+		Addr: ":" + cfg.Port,
+		// Wrapped, not routed. An earlier revision mounted a catch-all on the
+		// bare "/" pattern to give typo'd paths a problem+json 404; that also
+		// made ServeMux's 405 branch unreachable, so every wrong-verb request
+		// answered 404 with no Allow header. api.ProblemErrors leaves routing
+		// alone and rewrites only the plain-text bodies ServeMux itself
+		// produces — see internal/api/errors.go for why no route-shaped fix
+		// exists.
+		Handler: api.ProblemErrors(mux),
 	}
 
 	serverErr := make(chan error, 1)

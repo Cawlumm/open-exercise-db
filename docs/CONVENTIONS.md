@@ -254,9 +254,19 @@ GET /api/v1/exercises?page=2&per_page=50
   returns `translations`, not `locales`, because `/meta/locales` already returns `locales`
   with a different item type.
 - Pagination is the embedded `api.Pagination` / `api.PageParams` pair (`internal/api/pagination.go`),
-  never hand-rolled per endpoint. **Every** collection carries it, including ones too small to
-  need it today — a uniform contract beats a per-endpoint lookup, and taxonomy is exactly the
-  table that grows quietly once contributions open.
+  never hand-rolled per endpoint. **Every paginated collection carries it**, including ones too
+  small to need it today — a uniform contract beats a per-endpoint lookup, and taxonomy is
+  exactly the table that grows quietly once contributions open.
+- **One deliberate exception: `GET /exercises/export`.** It is a bulk dump whose entire purpose
+  is to hand back the complete dataset in one response, so it carries `total` but no
+  `page`/`per_page` — paginating it would defeat the endpoint. The exception is named here, and
+  pinned by name in `TestEveryCollectionCarriesPagination`, precisely so it reads as a decision
+  rather than as the one endpoint somebody forgot. Any *other* collection omitting the block is
+  a bug.
+- `Page` is capped (`maxPage`) as well as floored, and `Normalize` clamps both factors before
+  `Offset` multiplies them. This is arithmetic, not product policy: an unbounded `page`
+  overflows `int64`, and a negative `OFFSET` is a 500 that any unauthenticated caller can
+  trigger with one query parameter.
 - Pagination happens **in SQL** (`LIMIT`/`OFFSET` + a matching `Count…` method), never by
   slicing in the handler. The `Count` query's `WHERE` must match the list query's exactly, or
   `total` stops describing the page attached to it.

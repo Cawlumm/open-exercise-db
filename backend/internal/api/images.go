@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -114,6 +115,21 @@ func GetImage(ctx context.Context, s *store.Store, mediaStore media.Store, input
 
 	rc, err := mediaStore.Get(ctx, img.StorageKey)
 	if err != nil {
+		// A row whose object is absent is a 404, not a 500. Both backends
+		// report it as media.ErrObjectNotFound (FilesystemStore wraps
+		// os.ErrNotExist, R2Store maps types.NoSuchKey) specifically so this
+		// distinction could be made, and until this check existed nothing in
+		// the API consumed the sentinel — every missing object answered 500.
+		//
+		// It matters most in the case that actually produces missing objects:
+		// an incomplete cmd/migrate-media backfill leaves rows pointing at keys
+		// the destination bucket never received. As a 5xx those are uncacheable
+		// at the CDN, indistinguishable from the API being broken, and they
+		// bury a real outage under thousands of routine errors.
+		if errors.Is(err, media.ErrObjectNotFound) {
+			log.Printf("image %s: object %s missing from media store", img.ID, img.StorageKey)
+			return nil, huma.Error404NotFound("image not found")
+		}
 		log.Printf("media store get %s (image %s): %v", img.StorageKey, img.ID, err)
 		return nil, huma.Error500InternalServerError("internal error")
 	}

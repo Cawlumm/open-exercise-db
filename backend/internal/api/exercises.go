@@ -218,6 +218,16 @@ func registerExerciseRoutes(hapi huma.API, s *store.Store, imageBaseURL string) 
 // input struct, per docs/CONVENTIONS.md section 3/6 — no HTTP round trip
 // needed for logic assertions.
 func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, input *ListExercisesInput) (*ListExercisesOutput, error) {
+	// Normalized rather than passed through raw. This was the one collection
+	// handler still handing the store its unclamped input while reporting the
+	// clamped values back through paginationFor — so a direct call (the
+	// invocation path docs/CONVENTIONS.md section 3/6 mandates for tests, which
+	// bypasses huma's tag validation entirely) with PerPage: 5000 ran LIMIT
+	// 5000 and answered "per_page": 100, and the store's own floor at
+	// exercises.go's ExerciseFilter defers the ceiling back to the huma tag
+	// that a direct call never applies. Every sibling handler already routed
+	// through Normalize; this one silently opted out during the refactor.
+	page, perPage := input.Normalize()
 	filter := store.ExerciseFilter{
 		Q:           input.Q,
 		MuscleGroup: input.MuscleGroup,
@@ -225,8 +235,8 @@ func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, inp
 		Category:    input.Category,
 		Mechanic:    input.Mechanic,
 		Level:       input.Level,
-		Page:        input.Page,
-		PerPage:     input.PerPage,
+		Page:        page,
+		PerPage:     perPage,
 	}
 
 	exercises, total, err := s.Exercises.List(ctx, filter)
