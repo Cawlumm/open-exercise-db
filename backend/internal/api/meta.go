@@ -127,6 +127,10 @@ func ListTaxonomyTerms(ctx context.Context, s *store.Store, facet string, input 
 	}
 
 	out := &ListTaxonomyTermsOutput{}
+	// Empty slice, not nil — see ListExercises (exercises.go). Masked today
+	// because every facet is seeded non-empty, which is exactly why it's
+	// worth fixing now rather than when a new facet ships empty.
+	out.Body.Terms = make([]TaxonomyTerm, 0, len(terms))
 	for _, t := range terms {
 		out.Body.Terms = append(out.Body.Terms, taxonomyTermFromModel(t))
 	}
@@ -147,6 +151,8 @@ func ListLocales(ctx context.Context, s *store.Store, input *ListLocalesInput) (
 	}
 
 	out := &ListLocalesOutput{}
+	// Empty slice, not nil — see ListExercises (exercises.go).
+	out.Body.Locales = make([]Locale, 0, len(locales))
 	for _, l := range locales {
 		out.Body.Locales = append(out.Body.Locales, Locale{Code: l.Code})
 	}
