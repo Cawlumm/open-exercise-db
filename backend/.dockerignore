@@ -5,18 +5,14 @@
 # for a binary that needs none of it.
 data/
 
-# Never let a credentials file reach the daemon, even though the Dockerfile
-# copies nothing but source. The final image is distroless and carries only
-# the compiled binary, but the build context is what gets uploaded, cached,
-# and surfaced in build logs.
+# Never let a credentials file reach the daemon. The Dockerfile copies only
+# source and the final image is distroless, but the build context is what
+# gets uploaded, cached, and surfaced in build logs.
 .env
 .env.*
 !.env.example
 
-# Test and tooling artifacts that only slow the context transfer.
-*_test.go
-testdata/
-*.out
-*.test
-.git
-.gitignore
+# Deliberately NOT excluding *_test.go or testdata/. They cost almost
+# nothing to transfer, and excluding them would mean a future `go test` step
+# added to the Dockerfile silently compiles no tests and passes — the same
+# quiet-success failure this file's first entry exists to avoid.
