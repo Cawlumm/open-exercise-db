@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"log"
 	"sort"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -52,13 +53,61 @@ func Connect(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
+// migrationLockID namespaces this package's advisory lock. The value is
+// arbitrary but must never change: it is the shared name every instance
+// agrees to contend on, so a different value in a future release would let
+// old and new instances migrate concurrently — precisely what the lock
+// exists to prevent.
+const migrationLockID = 0x0EDB_0001
+
 // Migrate applies every embedded .sql file under migrations/ that hasn't
 // already run, in lexical filename order, each inside its own transaction.
 // Applied filenames are tracked in schema_migrations so a second call is a
 // no-op — this is what makes it safe to run on every process start rather
 // than as a separate release step.
+//
+// Safe to run from several processes at once, which is not the same as
+// being a no-op on a second call. Deciding "has this run?" and running it
+// are two statements, and on Cloud Run every cold start executes them: a
+// scale-from-zero burst, a revision rollout, or min-instances > 1 all start
+// containers simultaneously against one database. Two instances could both
+// read "not applied" and both proceed, and since the migration SQL creates
+// 17 objects with no IF NOT EXISTS, the loser gets "relation already
+// exists", which main turns into log.Fatalf — an instance that crash-loops
+// during a deploy, when the schema is least likely to be watched.
+//
+// A session-level advisory lock closes the window: the first instance holds
+// it for the whole check-and-apply, the rest block, and by the time they
+// proceed schema_migrations already says applied and they no-op. Advisory
+// rather than a table lock because it costs nothing when uncontended (the
+// overwhelmingly common case: one instance, nothing to apply) and needs no
+// object to exist yet — including on the very first deploy, where
+// schema_migrations itself is what is being created.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	if _, err := pool.Exec(ctx, `
+	// Taken on a dedicated connection, not the pool at large: a session-level
+	// advisory lock belongs to the session that took it, and pool.Exec is
+	// free to hand the unlock to a different connection, which would silently
+	// fail to release and leave the lock held until that session closed.
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection for migration lock: %w", err)
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, int64(migrationLockID)); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	defer func() {
+		// Best-effort by necessity: if this fails the connection is already
+		// broken, and Release() closing it drops the session and the lock
+		// with it. Logged rather than swallowed so it cannot be mistaken for
+		// a clean release.
+		if _, err := conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, int64(migrationLockID)); err != nil {
+			log.Printf("release migration lock: %v (the lock drops when this session closes)", err)
+		}
+	}()
+
+	if _, err := conn.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version     TEXT PRIMARY KEY,
 			applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
