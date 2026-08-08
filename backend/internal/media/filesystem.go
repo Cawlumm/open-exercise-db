@@ -86,6 +86,28 @@ func (fs *FilesystemStore) Get(_ context.Context, key string) (io.ReadCloser, er
 	return f, nil
 }
 
+// Exists reports whether baseDir/key is present, without opening it.
+//
+// os.Stat rather than Get-and-close: the answer is the same, but this makes
+// no file descriptor to leak if a caller forgets to close, and it mirrors
+// R2Store.Exists using HeadObject rather than GetObject for the same reason
+// one level up. A directory at key counts as absent — Put only ever writes
+// regular files, so a directory there is a malformed store, not an object.
+func (fs *FilesystemStore) Exists(_ context.Context, key string) (bool, error) {
+	path, err := fs.resolve(key)
+	if err != nil {
+		return false, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat %s: %w", key, err)
+	}
+	return info.Mode().IsRegular(), nil
+}
+
 // resolve validates key (ValidateKey — shared with R2Store so both backends
 // accept exactly the same key space, per Store's doc comment) and joins it
 // onto baseDir.

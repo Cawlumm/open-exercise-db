@@ -119,6 +119,49 @@ func TestR2Store_GetMissingKeyIsErrObjectNotFound(t *testing.T) {
 	}
 }
 
+// TestR2Store_Exists covers the check internal/seed's repair path runs once
+// per image to tell a live object from an exercise_images row that outlived
+// its bytes.
+//
+// This one genuinely needs a real bucket rather than a fake. S3 answers a
+// missing GetObject with NoSuchKey but a missing HeadObject with NotFound —
+// a HEAD response has no body to carry the richer code — and
+// implementations differ on which they mirror. A mock would return whichever
+// error the mock's author chose, which is precisely the assumption under
+// test.
+func TestR2Store_Exists(t *testing.T) {
+	s := requireR2(t)
+	ctx := context.Background()
+	key := testKey(t)
+
+	// Absent must be (false, nil): a repair that read "missing" as an error
+	// would skip forever, and one that read an error as "missing" would
+	// re-upload the whole bucket on a transient failure.
+	ok, err := s.Exists(ctx, key)
+	if err != nil {
+		t.Fatalf("Exists on a missing key returned an error: %v — absence is an answer, not a failure", err)
+	}
+	if ok {
+		t.Error("Exists = true for a key that was never written")
+	}
+
+	if err := s.Put(ctx, key, strings.NewReader("bytes"), "application/octet-stream"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	ok, err = s.Exists(ctx, key)
+	if err != nil {
+		t.Fatalf("Exists after Put: %v", err)
+	}
+	if !ok {
+		t.Error("Exists = false for a key that was just written")
+	}
+
+	if _, err := s.Exists(ctx, "../escape.bin"); err == nil {
+		t.Error("Exists accepted a traversal key that Put and Get reject")
+	}
+}
+
 // TestR2Store_OverwriteIsLastWriteWins pins the behavior cmd/migrate-media
 // depends on for idempotency: re-running a backfill over an existing object
 // must succeed and leave the newer bytes, not error on a conflict.

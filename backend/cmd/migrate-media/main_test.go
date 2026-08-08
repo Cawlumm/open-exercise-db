@@ -73,6 +73,19 @@ func (f *fakeStore) Get(_ context.Context, key string) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
+// Exists mirrors Get's view of the map rather than tracking presence
+// separately, so a test that seeds an object through Put or removes one
+// cannot leave the two answers disagreeing.
+func (f *fakeStore) Exists(_ context.Context, key string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failOn[key]; err != nil {
+		return false, err
+	}
+	_, ok := f.objects[key]
+	return ok, nil
+}
+
 func (f *fakeStore) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -10,6 +10,78 @@ import (
 	"testing"
 )
 
+// TestFilesystemStore_Exists covers the method internal/seed's repair path
+// depends on to tell "the row is right, the bytes are here" from "the row
+// outlived its object". A wrong answer either way is expensive: a false
+// negative re-downloads the entire dataset, a false positive leaves the
+// broken state in place claiming it is fine.
+func TestFilesystemStore_Exists(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewFilesystemStore(dir)
+	if err != nil {
+		t.Fatalf("NewFilesystemStore: %v", err)
+	}
+	ctx := context.Background()
+
+	if err := store.Put(ctx, "exercises/abc/0.jpg", bytes.NewReader([]byte("bytes")), "image/jpeg"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	t.Run("present", func(t *testing.T) {
+		ok, err := store.Exists(ctx, "exercises/abc/0.jpg")
+		if err != nil {
+			t.Fatalf("Exists: %v", err)
+		}
+		if !ok {
+			t.Error("Exists = false for a key that was just written")
+		}
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		ok, err := store.Exists(ctx, "exercises/abc/9.jpg")
+		if err != nil {
+			t.Fatalf("Exists on a missing key returned an error: %v — absence is an answer, not a failure", err)
+		}
+		if ok {
+			t.Error("Exists = true for a key that was never written")
+		}
+	})
+
+	t.Run("removed behind our back", func(t *testing.T) {
+		// The actual production scenario: the object disappears without the
+		// process that wrote it being involved.
+		if err := os.Remove(filepath.Join(dir, "exercises", "abc", "0.jpg")); err != nil {
+			t.Fatalf("remove: %v", err)
+		}
+		ok, err := store.Exists(ctx, "exercises/abc/0.jpg")
+		if err != nil {
+			t.Fatalf("Exists: %v", err)
+		}
+		if ok {
+			t.Error("Exists = true after the file was deleted")
+		}
+	})
+
+	t.Run("directory is not an object", func(t *testing.T) {
+		// Put only ever writes regular files, so a directory sitting at a key
+		// is a malformed store — reporting it present would send a repair
+		// into a Put that then fails on every run.
+		ok, err := store.Exists(ctx, "exercises/abc")
+		if err != nil {
+			t.Fatalf("Exists: %v", err)
+		}
+		if ok {
+			t.Error("Exists = true for a directory")
+		}
+	})
+
+	t.Run("rejects the same keys as Get", func(t *testing.T) {
+		if _, err := store.Exists(ctx, "../escape.jpg"); err == nil {
+			t.Error("Exists accepted a traversal key that Put and Get reject")
+		}
+	})
+}
+
 func TestFilesystemStore_PutGetRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewFilesystemStore(dir)

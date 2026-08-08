@@ -122,7 +122,8 @@ type Result struct {
 	Unchanged int // existing exercises whose content was identical — the idempotency case
 
 	ImagesUploaded int // newly downloaded, re-encoded, and stored
-	ImagesReused   int // already re-hosted from a previous run, recognized by storage key
+	ImagesReused   int // already re-hosted from a previous run, row and object both present
+	ImagesRepaired int // row survived but the object was gone — re-downloaded under the same id
 	ImagesFailed   int // download/decode/store failures — logged and skipped, not fatal
 
 	TaxonomyTermsSeen int
@@ -164,6 +165,7 @@ func Import(ctx context.Context, st *store.Store, opts Options) (Result, error) 
 			imageIDs, stats = processImages(ctx, st, opts.MediaStore, opts.HTTPClient, opts.ImageBaseURL, item.ID, item.Images, opts.Logger)
 			result.ImagesUploaded += stats.uploaded
 			result.ImagesReused += stats.reused
+			result.ImagesRepaired += stats.repaired
 			result.ImagesFailed += stats.failed
 		}
 
@@ -303,7 +305,7 @@ func buildRevisionInput(item fedExercise, imageIDs []string) store.ImportRevisio
 
 // imageStats totals processImages' outcomes for one exercise's image list.
 type imageStats struct {
-	uploaded, reused, failed int
+	uploaded, reused, repaired, failed int
 }
 
 // processImages re-hosts each of paths (relative to imageBaseURL) as an
@@ -316,38 +318,88 @@ type imageStats struct {
 // image_ids stable across runs (store.revisionUnchanged compares it like
 // any other field).
 //
+// Repair: recognizing the row is not the same as confirming the object, and
+// the two have independent lifetimes — Postgres persists on its own volume
+// while the bytes sit in a container layer or an R2 bucket that can be
+// recreated under it. This originally treated the row as proof of the
+// object and skipped straight to reuse, so a deployment that lost its media
+// directory kept 1746 rows advertising images that every request 404'd, and
+// re-running the importer — the documented repair — reported them all
+// "reused" and downloaded nothing. The gap was unfixable through any
+// supported path. Checking mediaStore.Exists costs one HEAD (or one stat)
+// per image and makes the import genuinely idempotent about bytes rather
+// than only about rows.
+//
+// A repaired image keeps its existing id, so revisions referencing it are
+// untouched; only the object and the row's encoding facts are rewritten.
+//
 // Fault tolerance: a download, decode, or store failure for one image is
 // logged and that image is skipped — never fatal to the exercise (its
 // other images still get processed) or to the run (docs/PHASE1_BUILD_PLAN.md
-// WO-4: "one bad asset must not abort an 800-item import").
+// WO-4: "one bad asset must not abort an 800-item import"). An Exists that
+// errors is deliberately treated as present: the failure means the store
+// could not answer, and re-uploading every object because a token briefly
+// lost its read scope would be a far more expensive mistake than skipping a
+// repair this run and catching it on the next.
 func processImages(ctx context.Context, st *store.Store, mediaStore media.Store, client *http.Client, imageBaseURL, sourceID string, paths []string, logger *log.Logger) ([]string, imageStats) {
 	ids := make([]string, 0, len(paths))
 	var stats imageStats
 
 	for i, p := range paths {
 		key := fmt.Sprintf("exercises/%s/%d.jpg", sourceID, i)
+		imageURL := imageBaseURL + p
 
-		if existing, err := st.Media.GetImageByStorageKey(ctx, key); err == nil {
+		existing, err := st.Media.GetImageByStorageKey(ctx, key)
+		switch {
+		case err == nil:
+			// Row found. Whether that is enough depends on the object.
+			present, existsErr := mediaStore.Exists(ctx, key)
+			if existsErr != nil {
+				logger.Printf("import %s: check stored image %s: %v (assuming present, will retry next run)", sourceID, key, existsErr)
+				ids = append(ids, existing.ID)
+				stats.reused++
+				continue
+			}
+			if present {
+				ids = append(ids, existing.ID)
+				stats.reused++
+				continue
+			}
+
+			encoded, err := fetchEncoded(ctx, client, imageURL)
+			if err != nil {
+				logger.Printf("import %s: repair %s: %v (skipping)", sourceID, key, err)
+				stats.failed++
+				continue
+			}
+			if err := mediaStore.Put(ctx, key, bytes.NewReader(encoded.Data), encoded.ContentType); err != nil {
+				logger.Printf("import %s: repair store %s: %v (skipping)", sourceID, key, err)
+				stats.failed++
+				continue
+			}
+			// Row metadata is updated after the object lands, never before:
+			// a failure here leaves a recoverable disagreement (correct
+			// bytes, stale dimensions) that the next run fixes, whereas the
+			// reverse order would claim an encoding for an object that was
+			// never written.
+			width, height := encoded.Width, encoded.Height
+			if err := st.Media.UpdateImageEncoding(ctx, existing.ID, encoded.ContentType, &width, &height); err != nil {
+				logger.Printf("import %s: repair metadata %s: %v (object restored, row left stale)", sourceID, key, err)
+			}
+			logger.Printf("import %s: repaired missing object %s (row existed, bytes did not)", sourceID, key)
 			ids = append(ids, existing.ID)
-			stats.reused++
+			stats.repaired++
 			continue
-		} else if !errors.Is(err, pgx.ErrNoRows) {
+
+		case !errors.Is(err, pgx.ErrNoRows):
 			logger.Printf("import %s: look up existing image %s: %v (skipping)", sourceID, key, err)
 			stats.failed++
 			continue
 		}
 
-		imageURL := imageBaseURL + p
-		raw, err := downloadImage(ctx, client, imageURL)
+		encoded, err := fetchEncoded(ctx, client, imageURL)
 		if err != nil {
-			logger.Printf("import %s: download %s: %v (skipping)", sourceID, imageURL, err)
-			stats.failed++
-			continue
-		}
-
-		encoded, err := media.Encode(bytes.NewReader(raw))
-		if err != nil {
-			logger.Printf("import %s: encode %s: %v (skipping)", sourceID, imageURL, err)
+			logger.Printf("import %s: %v (skipping)", sourceID, err)
 			stats.failed++
 			continue
 		}
@@ -383,6 +435,26 @@ func processImages(ctx context.Context, st *store.Store, mediaStore media.Store,
 	}
 
 	return ids, stats
+}
+
+// fetchEncoded downloads url and runs it through media.Encode, the pair of
+// steps that turns a source URL into bytes ready for a Store.
+//
+// Extracted so the first-upload and repair paths in processImages cannot
+// drift: a repair that re-downloaded without re-encoding would write raw
+// source bytes — EXIF intact, dimensions uncapped — under a key whose row
+// claims the encoder's normalized output. Errors are wrapped with the URL
+// so the caller can log one line without restating it.
+func fetchEncoded(ctx context.Context, client *http.Client, url string) (media.EncodeResult, error) {
+	raw, err := downloadImage(ctx, client, url)
+	if err != nil {
+		return media.EncodeResult{}, fmt.Errorf("download %s: %w", url, err)
+	}
+	encoded, err := media.Encode(bytes.NewReader(raw))
+	if err != nil {
+		return media.EncodeResult{}, fmt.Errorf("encode %s: %w", url, err)
+	}
+	return encoded, nil
 }
 
 // downloadImage fetches url and returns its body, capped at maxImageBytes.
