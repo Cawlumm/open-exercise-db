@@ -37,6 +37,28 @@ services:
       # Dockerfile would otherwise silently move image storage back off the
       # volume, with nothing failing until a restart.
       - MEDIA_DIR=/app/data/media
+      # Cloudflare R2 (internal/media.NewStore). All four empty selects the
+      # filesystem at MEDIA_DIR above; all four set selects R2 and MEDIA_DIR
+      # is ignored by the server; a partial set is a startup error rather
+      # than a silent fallback.
+      #
+      # These have to be listed explicitly. Compose substitutes ${R2_*} from
+      # .env, but only for variables the service actually declares — without
+      # these lines a fully-populated .env reaches the host and stops there,
+      # leaving the container on the filesystem backend with nothing failing
+      # to say so. That is the exact "boots fine, 404s later" outcome
+      # NewStore's partial-config error exists to prevent, and it cannot help
+      # here: from inside the container nothing is set, which is
+      # indistinguishable from deliberately choosing the filesystem.
+      - R2_ACCOUNT_ID=${R2_ACCOUNT_ID:-}
+      - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID:-}
+      - R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY:-}
+      - R2_BUCKET=${R2_BUCKET:-}
+      # Host that contract.Exercise.Images[].url points at instead of this
+      # API's own /api/v1/images/{id}. Unset means serve through this
+      # process. The server logs a warning when this and the selected
+      # storage backend disagree (internal/config.Config.Warnings).
+      - IMAGE_BASE_URL=${IMAGE_BASE_URL:-}
       # Rate limiting (docs/API_POLICY.md) — all optional; an empty value
       # falls back to the defaults in backend/internal/config/config.go.
       # Passed through so a self-hoster can tune them via .env without
