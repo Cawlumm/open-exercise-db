@@ -1,0 +1,22 @@
+# The build context is ./backend, and MEDIA_DIR defaults to ./data/media —
+# so an importer run started from backend/ leaves ~110MB of re-hosted images
+# sitting inside the context. .gitignore keeps them out of git but Docker
+# does not read .gitignore, so every build shipped all of it to the daemon
+# for a binary that needs none of it.
+data/
+
+# Never let a credentials file reach the daemon, even though the Dockerfile
+# copies nothing but source. The final image is distroless and carries only
+# the compiled binary, but the build context is what gets uploaded, cached,
+# and surfaced in build logs.
+.env
+.env.*
+!.env.example
+
+# Test and tooling artifacts that only slow the context transfer.
+*_test.go
+testdata/
+*.out
+*.test
+.git
+.gitignore
