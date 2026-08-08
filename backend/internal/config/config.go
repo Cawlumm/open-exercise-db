@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // Config holds every runtime setting. Populated once at startup and passed
@@ -204,7 +205,46 @@ func (c Config) Warnings() []string {
 		))
 	}
 
+	// The auth settings are Phase 2 scaffolding with no consumer anywhere in
+	// the codebase — there is no login, no token issuing, and no admin check
+	// to gate. Silence here would be worse than the unused field: an operator
+	// who sets JWT_SECRET to a long random string has taken a deliberate
+	// security action and has every reason to believe it did something. It
+	// did not. Saying so is the difference between "not built yet" and
+	// "built and protecting you", which is not a distinction to leave to a
+	// reader of the source.
+	if unused := c.unusedAuthSettings(); len(unused) > 0 {
+		out = append(out, fmt.Sprintf(
+			"%s set but currently unused: authentication is not implemented yet "+
+				"(Phase 2), so these values gate nothing and secure nothing. Every "+
+				"endpoint is public and read-only by design — see docs/API_POLICY.md.",
+			strings.Join(unused, ", "),
+		))
+	}
+
 	return out
+}
+
+// unusedAuthSettings names the auth-related settings that are populated but
+// wired to nothing. Kept as a list rather than a bool so the warning can say
+// which ones the operator actually set, rather than making them guess which
+// of four it means.
+func (c Config) unusedAuthSettings() []string {
+	var set []string
+	for _, s := range []struct {
+		name  string
+		value string
+	}{
+		{"JWT_SECRET", c.JWTSecret},
+		{"GITHUB_OAUTH_CLIENT_ID", c.GitHubClientID},
+		{"GITHUB_OAUTH_CLIENT_SECRET", c.GitHubClientSecret},
+		{"ADMIN_GITHUB_LOGINS", c.AdminGitHubLogins},
+	} {
+		if strings.TrimSpace(s.value) != "" {
+			set = append(set, s.name)
+		}
+	}
+	return set
 }
 
 // resolveMediaDir converts dir to an absolute path, so where images actually
