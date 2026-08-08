@@ -378,13 +378,25 @@ func processImages(ctx context.Context, st *store.Store, mediaStore media.Store,
 				continue
 			}
 			// Row metadata is updated after the object lands, never before:
-			// a failure here leaves a recoverable disagreement (correct
-			// bytes, stale dimensions) that the next run fixes, whereas the
-			// reverse order would claim an encoding for an object that was
-			// never written.
+			// the reverse order would claim an encoding for an object that
+			// was never written.
+			//
+			// A failure here does NOT self-heal. The object now exists, so
+			// every later run takes the reuse path above and never revisits
+			// this row — the stale width/height/content_type persist until
+			// someone corrects them or deletes the object. Deliberately not
+			// counted as a failure: the bytes are restored and the image
+			// serves, which is the outcome that mattered. It is logged at a
+			// volume proportionate to being permanent rather than passed
+			// over, because an unbounded "will fix itself" is exactly the
+			// assumption that produced the missing objects in the first
+			// place.
 			width, height := encoded.Width, encoded.Height
 			if err := st.Media.UpdateImageEncoding(ctx, existing.ID, encoded.ContentType, &width, &height); err != nil {
-				logger.Printf("import %s: repair metadata %s: %v (object restored, row left stale)", sourceID, key, err)
+				logger.Printf("import %s: WARNING: repaired object %s but could not update its row: %v — "+
+					"the image serves correctly while its recorded width/height/content_type stay stale, "+
+					"and no later run will retry this. Fix the row by hand, or delete the object to force "+
+					"another repair.", sourceID, key, err)
 			}
 			logger.Printf("import %s: repaired missing object %s (row existed, bytes did not)", sourceID, key)
 			ids = append(ids, existing.ID)
