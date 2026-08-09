@@ -95,8 +95,23 @@ func main() {
 		mode = "dry-run"
 	}
 	log.Printf(
-		"%s complete: fetched=%d created=%d updated=%d unchanged=%d taxonomy_terms=%d images(uploaded=%d reused=%d failed=%d)",
+		"%s complete: fetched=%d created=%d updated=%d unchanged=%d taxonomy_terms=%d images(uploaded=%d reused=%d repaired=%d failed=%d)",
 		mode, result.Fetched, result.Created, result.Updated, result.Unchanged, result.TaxonomyTermsSeen,
-		result.ImagesUploaded, result.ImagesReused, result.ImagesFailed,
+		result.ImagesUploaded, result.ImagesReused, result.ImagesRepaired, result.ImagesFailed,
 	)
+
+	// A nonzero repaired count is worth more than a number in a summary line:
+	// it means this deployment lost its media storage while Postgres kept the
+	// rows pointing at it, and until this run every one of those images was a
+	// 404 behind a URL the API advertised as fetchable. The import fixed it,
+	// but the underlying cause — an unmounted media volume, a recreated
+	// bucket — is still there and will do it again.
+	if result.ImagesRepaired > 0 {
+		log.Printf(
+			"WARNING: %d image(s) had a database row but no stored object, and were re-downloaded. "+
+				"Storage lost data that Postgres did not — check that MEDIA_DIR is on a persistent volume, "+
+				"or that R2_BUCKET points at the bucket the rows were written against.",
+			result.ImagesRepaired,
+		)
+	}
 }

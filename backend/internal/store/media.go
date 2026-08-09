@@ -136,3 +136,33 @@ func (s *MediaStore) InsertImage(ctx context.Context, in InsertImageInput) (stri
 	}
 	return id, nil
 }
+
+// UpdateImageEncoding re-points an existing row's encoding facts at bytes
+// that were just rewritten under the same storage key, leaving identity
+// (id), provenance (license, attribution_text), and moderation (status)
+// untouched.
+//
+// Exists for internal/seed's repair path, which re-uploads an image whose
+// object went missing while its row survived. It keeps the id — that is the
+// entire point, since exercise_revisions.image_ids reference it and
+// re-inserting would churn every revision — but the bytes it writes are
+// freshly encoded, and media.Encode's output is a function of the encoder's
+// current dimension cap and format rules, not a constant across versions.
+// Without this the row would keep asserting the width, height, and content
+// type of an encode that no longer describes the object, which is the same
+// species of quiet lie as the missing object it just repaired.
+func (s *MediaStore) UpdateImageEncoding(ctx context.Context, id, contentType string, width, height *int) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE exercise_images
+		SET content_type = $2, width = $3, height = $4
+		WHERE id = $1`,
+		id, contentType, width, height,
+	)
+	if err != nil {
+		return fmt.Errorf("update image encoding %s: %w", id, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("update image encoding %s: no such image", id)
+	}
+	return nil
+}

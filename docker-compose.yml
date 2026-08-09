@@ -30,6 +30,35 @@ services:
       - DATABASE_URL=postgres://${POSTGRES_USER:-openexercisedb}:${POSTGRES_PASSWORD:-openexercisedb}@postgres:5432/${POSTGRES_DB:-openexercisedb}?sslmode=disable
       - JWT_SECRET=${JWT_SECRET}
       - ADMIN_GITHUB_LOGINS=${ADMIN_GITHUB_LOGINS}
+      # Set explicitly rather than leaning on the "./data/media" default
+      # resolving against the image's WORKDIR. That coupling is invisible
+      # from either file on its own, and it is exactly what has to stay true
+      # for the volume below to catch the writes — a WORKDIR change in the
+      # Dockerfile would otherwise silently move image storage back off the
+      # volume, with nothing failing until a restart.
+      - MEDIA_DIR=/app/data/media
+      # Cloudflare R2 (internal/media.NewStore). All four empty selects the
+      # filesystem at MEDIA_DIR above; all four set selects R2 and MEDIA_DIR
+      # is ignored by the server; a partial set is a startup error rather
+      # than a silent fallback.
+      #
+      # These have to be listed explicitly. Compose substitutes ${R2_*} from
+      # .env, but only for variables the service actually declares — without
+      # these lines a fully-populated .env reaches the host and stops there,
+      # leaving the container on the filesystem backend with nothing failing
+      # to say so. That is the exact "boots fine, 404s later" outcome
+      # NewStore's partial-config error exists to prevent, and it cannot help
+      # here: from inside the container nothing is set, which is
+      # indistinguishable from deliberately choosing the filesystem.
+      - R2_ACCOUNT_ID=${R2_ACCOUNT_ID:-}
+      - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID:-}
+      - R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY:-}
+      - R2_BUCKET=${R2_BUCKET:-}
+      # Host that contract.Exercise.Images[].url points at instead of this
+      # API's own /api/v1/images/{id}. Unset means serve through this
+      # process. The server logs a warning when this and the selected
+      # storage backend disagree (internal/config.Config.Warnings).
+      - IMAGE_BASE_URL=${IMAGE_BASE_URL:-}
       # Rate limiting (docs/API_POLICY.md) — all optional; an empty value
       # falls back to the defaults in backend/internal/config/config.go.
       # Passed through so a self-hoster can tune them via .env without
@@ -42,6 +71,17 @@ services:
       - OEDB_RATELIMIT_EXPORT_BURST=${OEDB_RATELIMIT_EXPORT_BURST:-}
       - OEDB_RATELIMIT_UNIDENTIFIED_RPM=${OEDB_RATELIMIT_UNIDENTIFIED_RPM:-}
       - OEDB_RATELIMIT_UNIDENTIFIED_BURST=${OEDB_RATELIMIT_UNIDENTIFIED_BURST:-}
+    # Re-hosted image bytes. Without this they land in the container's
+    # writable layer and are destroyed by any `compose down`, rebuild, or
+    # recreate — while Postgres keeps every exercise_images row on its own
+    # volume above. The two halves of an image having different lifetimes is
+    # what produced a database advertising 1,746 images that all 404'd.
+    #
+    # Unused when the R2_* settings are configured (bytes go to the bucket
+    # and MEDIA_DIR is ignored by the server), but harmless there, and
+    # self-host without object storage is the documented default path.
+    volumes:
+      - ./data/media:/app/data/media
     ports:
       - "${PORT:-8080}:8080"
     depends_on:

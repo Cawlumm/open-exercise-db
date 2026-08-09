@@ -142,10 +142,47 @@ func (s *R2Store) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	return out.Body, nil
 }
 
+// Exists reports whether key holds an object, using HeadObject so only
+// headers cross the wire — Get would answer the same question by
+// downloading and billing for the entire object, and internal/seed asks
+// this once per image for the whole dataset.
+//
+// The not-found check tests types.NotFound *and* types.NoSuchKey, which is
+// not redundant: S3 returns NoSuchKey for a missing GetObject but NotFound
+// for a missing HeadObject (a HEAD response has no body to carry the
+// richer error code in), and S3-compatible implementations are inconsistent
+// about which they mirror. Matching only one leaves a missing object
+// surfacing as a transport error on some backends, which the caller is
+// required to treat as "unknown, leave alone" — silently disabling repair
+// on exactly the deployments that need it.
+func (s *R2Store) Exists(ctx context.Context, key string) (bool, error) {
+	if err := ValidateKey(key); err != nil {
+		return false, err
+	}
+
+	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		var notFound *types.NotFound
+		var noSuchKey *types.NoSuchKey
+		if errors.As(err, &notFound) || errors.As(err, &noSuchKey) {
+			return false, nil
+		}
+		return false, fmt.Errorf("r2 head %s: %w", key, err)
+	}
+	return true, nil
+}
+
 // ErrObjectNotFound reports that a key does not exist in the store. Both
 // Store implementations wrap it for that condition — R2Store.Get on
 // types.NoSuchKey, FilesystemStore.Get on os.ErrNotExist — so a caller can
 // match it with errors.Is without knowing which backend it holds.
+//
+// Exists does not use it: "absent" is that method's ordinary answer rather
+// than a failure, so it reports (false, nil) and reserves a non-nil error
+// for genuinely not knowing.
 //
 // Declared here rather than in doc.go beside the interface because it is
 // part of Get's error contract, and keeping it next to the two returns that

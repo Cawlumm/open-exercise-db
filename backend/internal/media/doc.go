@@ -25,6 +25,28 @@ import (
 type Store interface {
 	Put(ctx context.Context, key string, r io.Reader, contentType string) error
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
+
+	// Exists reports whether key holds an object, without transferring its
+	// bytes. Get would answer the same question, but on R2 it bills and
+	// downloads a full object to do it — and internal/seed asks this once
+	// per image on every import run, so the difference is the whole dataset
+	// over the wire versus a HEAD.
+	//
+	// Added because exercise_images rows and the objects they name have
+	// independent lifetimes: Postgres persists on its own volume while the
+	// bytes live in a container layer or an R2 bucket that can be recreated
+	// under it. Nothing could ask "are the bytes actually there?" without
+	// this, so internal/seed treated the row's existence as proof of the
+	// object's and skipped re-downloading images that were already gone —
+	// making the missing-bytes state permanent rather than self-healing.
+	//
+	// A false with a nil error means "definitively absent". An error means
+	// the question could not be answered (network, credentials, permissions)
+	// and callers must not read that as absence: the repair path in
+	// internal/seed treats an error as "leave it alone", since re-uploading
+	// on an unreadable answer would rewrite every object in the bucket the
+	// first time a token lost its read scope.
+	Exists(ctx context.Context, key string) (bool, error)
 }
 
 // ValidateKey rejects keys neither Store implementation should accept.

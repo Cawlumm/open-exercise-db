@@ -100,8 +100,25 @@ func main() {
 	defer limiter.Close()
 
 	mux := http.NewServeMux()
+	// Health pings the database rather than answering ok unconditionally.
+	// This is what a load balancer routes on, and every useful endpoint here
+	// needs Postgres: an instance that cannot reach Neon has nothing to
+	// serve, so a health check that ignores the database reports ready for
+	// an instance that will 500 every request it receives. The ping is
+	// bounded well inside any sane probe interval — a health check that
+	// hangs is indistinguishable from one that fails, except it ties up a
+	// connection while being useless.
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		pingCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+
 		w.Header().Set("Content-Type", "application/json")
+		if err := pool.Ping(pingCtx); err != nil {
+			log.Printf("health: database ping failed: %v", err)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"status": "unavailable", "reason": "database"})
+			return
+		}
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
@@ -161,6 +178,32 @@ func main() {
 		// ServeMux's plain-text errors — while CORS headers stay plainly
 		// readable on the wire whatever encoding the body ends up in.
 		Handler: api.CORS(api.Compress(api.ProblemErrors(mux))),
+
+		// Without these, a connection that opens and then dribbles its
+		// request line one byte per minute holds a goroutine and a file
+		// descriptor indefinitely — the whole of Slowloris, and free to
+		// mount against a public zero-auth API. Cloud Run's request timeout
+		// does not cover it: that bounds a request once dispatched, while
+		// this is about connections that never finish arriving. Neither does
+		// the rate limiter, which runs per request — these never become one.
+		//
+		// ReadHeaderTimeout is the one that closes that hole; ReadTimeout
+		// and IdleTimeout are the same argument for the body and for
+		// keep-alive connections held open after a response.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+
+		// WriteTimeout is deliberately the most generous of the four.
+		// GET /exercises/export serves the whole dataset — 1.6MB today and
+		// growing — so a limit tuned to the median response would sever
+		// exactly the request that endpoint exists for, on exactly the slow
+		// connections least able to retry it.
+		WriteTimeout: 120 * time.Second,
+
+		// Already the net/http default; stated so the header budget sits
+		// beside the timeouts bounding the same resource.
+		MaxHeaderBytes: 1 << 20,
 	}
 
 	serverErr := make(chan error, 1)

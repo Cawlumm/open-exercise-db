@@ -81,6 +81,21 @@ against the same Postgres the compose stack already published on `localhost:5432
 `DATABASE_URL` here points at `localhost`, not the `postgres` service-network hostname the
 container itself uses.
 
+Re-running it is also how you **repair missing images**. Image rows live in Postgres while
+the bytes live in `MEDIA_DIR` (or an R2 bucket), and the two can be lost independently — a
+media directory that wasn't on a persistent volume, a recreated bucket. The importer checks
+that each image's object actually exists rather than trusting the row, and re-downloads the
+ones that don't, keeping their existing ids so no revision changes. A run that repairs
+anything says so:
+
+```
+images(uploaded=0 reused=0 repaired=1746 failed=0)
+WARNING: 1746 image(s) had a database row but no stored object, and were re-downloaded.
+```
+
+That warning means storage lost data Postgres didn't — the import fixed the symptom, but
+check `MEDIA_DIR`/`R2_BUCKET` before it happens again.
+
 Once the import finishes, the API is live:
 
 ```bash
