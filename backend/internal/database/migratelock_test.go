@@ -118,9 +118,18 @@ func TestMigrate_ReleasesItsLock(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 
+	// Scoped to this test's own database. pg_locks is cluster-wide, and
+	// advisory locks are per-database, so an unfiltered count also sees every
+	// other package's Migrate running against its own disposable database —
+	// which is exactly what `go test ./...` does, since it runs packages in
+	// parallel. Locally under -p 1 the unfiltered query passed; CI failed it
+	// immediately, and the lock was never the thing at fault.
 	var held int
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objid = $1`,
+		`SELECT count(*) FROM pg_locks
+		 WHERE locktype = 'advisory'
+		   AND objid = $1
+		   AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
 		int32(migrationLockID),
 	).Scan(&held); err != nil {
 		t.Fatalf("query pg_locks: %v", err)
