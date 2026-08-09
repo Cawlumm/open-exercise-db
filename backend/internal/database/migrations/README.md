@@ -16,6 +16,24 @@ Phase 1 lands `0001_initial_schema.sql` covering all nine tables from
 `submissions`, `users`, `exercise_images`, `exercise_videos`, `taxonomy_terms`,
 `taxonomy_term_translations`.
 
+`0002_image_variants.sql` adds `exercise_image_variants`, turning an image's
+storage key from a value every reader re-derived into one the database
+records. It backfills a `full` rendition for each existing image from that
+image's current `storage_key`, so **no object moves** — its only effect on
+storage is schema-shaped, which is exactly why it lands before the
+production R2 backfill rather than after it.
+
+## Migrations run against a lock, and can run concurrently
+
+`Migrate` holds a Postgres advisory lock across the whole check-and-apply, so
+instances starting simultaneously (Cloud Run scale-from-zero, a revision
+rollout) cannot race each other into `relation already exists`. No migration
+file has to do anything to get this.
+
+It does mean a slow migration blocks other instances' *startup* rather than
+corrupting anything — the right trade, but worth knowing before writing one
+that rewrites a large table.
+
 ## Why this directory lives under `internal/database/`, not `backend/migrations/`
 
 `//go:embed` cannot reach outside (or above) the directory containing the

@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Cawlumm/open-exercise-db/internal/media"
+	"github.com/Cawlumm/open-exercise-db/internal/model"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
 )
 
@@ -391,6 +392,11 @@ func processImages(ctx context.Context, st *store.Store, mediaStore media.Store,
 			// over, because an unbounded "will fix itself" is exactly the
 			// assumption that produced the missing objects in the first
 			// place.
+			// The variant row is re-pointed too: a repair rewrote these bytes,
+			// so the rendition's recorded encoding has to describe what is
+			// actually stored, not what was there before it went missing.
+			recordFullVariant(ctx, st, existing.ID, key, encoded, logger, sourceID)
+
 			width, height := encoded.Width, encoded.Height
 			if err := st.Media.UpdateImageEncoding(ctx, existing.ID, encoded.ContentType, &width, &height); err != nil {
 				logger.Printf("import %s: WARNING: repaired object %s but could not update its row: %v — "+
@@ -442,11 +448,38 @@ func processImages(ctx context.Context, st *store.Store, mediaStore media.Store,
 			continue
 		}
 
+		recordFullVariant(ctx, st, id, key, encoded, logger, sourceID)
+
 		ids = append(ids, id)
 		stats.uploaded++
 	}
 
 	return ids, stats
+}
+
+// recordFullVariant writes the "full" rendition row for an image whose
+// bytes were just stored, so a newly imported image is described the same
+// way migration 0002 describes every pre-existing one.
+//
+// Failure is logged and not counted against the image. The image itself is
+// complete — row written, bytes stored, and contract.Image's url/width/
+// height all read from exercise_images rather than from here — so a missing
+// variant row costs the response nothing today: media.BuildImages
+// synthesizes the full entry when none exists. Treating it as a failure
+// would drop a perfectly good image out of the revision over metadata that
+// is currently redundant.
+func recordFullVariant(ctx context.Context, st *store.Store, imageID, key string, encoded media.EncodeResult, logger *log.Logger, sourceID string) {
+	width, height := encoded.Width, encoded.Height
+	if _, err := st.Media.UpsertImageVariant(ctx, store.UpsertImageVariantInput{
+		ImageID:     imageID,
+		Name:        model.VariantFull,
+		StorageKey:  key,
+		ContentType: encoded.ContentType,
+		Width:       &width,
+		Height:      &height,
+	}); err != nil {
+		logger.Printf("import %s: record full variant for %s: %v (image is served from exercise_images; re-run to add it)", sourceID, key, err)
+	}
 }
 
 // fetchEncoded downloads url and runs it through media.Encode, the pair of

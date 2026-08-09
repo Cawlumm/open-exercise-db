@@ -99,6 +99,33 @@ func registerImageRoutes(hapi huma.API, s *store.Store, mediaStore media.Store) 
 	}, func(ctx context.Context, input *GetImageInput) (*GetImageOutput, error) {
 		return GetImage(ctx, s, mediaStore, input)
 	})
+
+	// Registered after the plain-id route, and reachable because the two
+	// patterns differ in segment count rather than overlapping — huma routes
+	// through the same ServeMux whose wildcard rules api.go's index routes
+	// already had to be checked against.
+	huma.Register(hapi, huma.Operation{
+		OperationID: "get-image-variant",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/images/{id}/{variant}",
+		Summary:     "Fetch one rendition of a re-hosted exercise image",
+		Description: "Renditions are listed per image as Exercise.Images[].variants. " +
+			"Today every image has exactly one, full, whose URL is the same as " +
+			"Image.url — smaller sizes will appear here without url changing.",
+		Tags:     []string{"images"},
+		Metadata: map[string]any{rateLimitTierKey: ratelimit.TierRead},
+		Errors:   []int{http.StatusNotFound, http.StatusTooManyRequests},
+		Responses: map[string]*huma.Response{
+			"200": {
+				Description: "Image bytes",
+				Content: map[string]*huma.MediaType{
+					"image/jpeg": {Schema: &huma.Schema{Type: "string", Format: "binary"}},
+				},
+			},
+		},
+	}, func(ctx context.Context, input *GetImageVariantInput) (*GetImageOutput, error) {
+		return GetImageVariant(ctx, s, mediaStore, input)
+	})
 }
 
 // GetImage looks up id's exercise_images row for its storage_key/
@@ -148,6 +175,72 @@ func GetImage(ctx context.Context, s *store.Store, mediaStore media.Store, input
 
 	return &GetImageOutput{
 		ContentType:  img.ContentType,
+		CacheControl: imageCacheControl,
+		ETag:         etagHeader(tag),
+		Body:         data,
+	}, nil
+}
+
+// GetImageVariantInput identifies one rendition by image id and variant
+// name.
+//
+// Variant is a path segment rather than a ?variant= query parameter so each
+// rendition is a distinct cacheable URL. A query string would work, but CDNs
+// vary in whether they key on it, and getting a full-size image from a
+// thumbnail URL because an edge cache ignored the query is the failure this
+// avoids by construction.
+//
+// Pattern-constrained rather than validated in the handler: an unbounded
+// name reaches the store as a query parameter and, worse, would be
+// reflected into a 404 message. The character class matches what a
+// rendition name can legitimately be.
+type GetImageVariantInput struct {
+	conditional.Params
+	ID      string `path:"id" format:"uuid" doc:"Image UUID — see contract.Image.ID / Exercise.Images[].id"`
+	Variant string `path:"variant" pattern:"^[a-z0-9][a-z0-9_-]{0,31}$" doc:"Rendition name from Exercise.Images[].variants[].name, e.g. full"`
+}
+
+// GetImageVariant serves one named rendition's bytes.
+//
+// Unknown names are 404, never a fallback to the full image. A client
+// asking for a thumbnail and silently receiving a full-resolution image
+// sees a successful request while downloading many times the bytes it
+// budgeted for — on exactly the mobile connections thumbnails exist to
+// protect, and with nothing in the response to reveal the substitution.
+func GetImageVariant(ctx context.Context, s *store.Store, mediaStore media.Store, input *GetImageVariantInput) (*GetImageOutput, error) {
+	variant, err := s.Media.GetImageVariant(ctx, input.ID, input.Variant)
+	if err != nil {
+		return nil, mapStoreError(err, "image variant not found")
+	}
+
+	rc, err := mediaStore.Get(ctx, variant.StorageKey)
+	if err != nil {
+		// Same reasoning as GetImage: a row whose object is absent is a 404,
+		// not a 500. Variants make this more likely rather than less — a
+		// partially-completed re-encode leaves rows for renditions whose
+		// bytes were never written.
+		if errors.Is(err, media.ErrObjectNotFound) {
+			log.Printf("image %s variant %s: object %s missing from media store", input.ID, input.Variant, variant.StorageKey)
+			return nil, huma.Error404NotFound("image variant not found")
+		}
+		log.Printf("media store get %s (image %s variant %s): %v", variant.StorageKey, input.ID, input.Variant, err)
+		return nil, huma.Error500InternalServerError("internal error")
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		log.Printf("read image %s variant %s (%s): %v", input.ID, input.Variant, variant.StorageKey, err)
+		return nil, huma.Error500InternalServerError("internal error")
+	}
+
+	tag := etagValueBytes(data)
+	if notModified := checkNotModified(&input.Params, tag, imageCacheControl); notModified != nil {
+		return nil, notModified
+	}
+
+	return &GetImageOutput{
+		ContentType:  variant.ContentType,
 		CacheControl: imageCacheControl,
 		ETag:         etagHeader(tag),
 		Body:         data,
