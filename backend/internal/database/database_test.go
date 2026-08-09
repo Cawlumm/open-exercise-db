@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"testing"
@@ -278,8 +279,14 @@ func TestMigrate_IsIdempotent(t *testing.T) {
 			t.Errorf("schema_migrations has no row for %q after first Migrate", version)
 		}
 
-		if got := migrationRowCount(t, ctx, pool); got != 1 {
-			t.Errorf("schema_migrations row count = %d, want 1", got)
+		// Compared against the number of embedded migration files rather
+		// than a literal. The literal was 1, correct when there was one
+		// migration, and it turned the next migration ever added into a
+		// failing test that said nothing about migrations being wrong —
+		// which is exactly what 0002 did. What this actually cares about is
+		// "one row per file", and that stays true however many files exist.
+		if got, want := migrationRowCount(t, ctx, pool), embeddedMigrationCount(t); got != want {
+			t.Errorf("schema_migrations row count = %d, want %d (one per embedded migration)", got, want)
 		}
 	})
 
@@ -288,8 +295,8 @@ func TestMigrate_IsIdempotent(t *testing.T) {
 			t.Fatalf("Migrate (second run): %v", err)
 		}
 
-		if got := migrationRowCount(t, ctx, pool); got != 1 {
-			t.Errorf("schema_migrations row count after second Migrate = %d, want 1 (re-applied instead of skipped)", got)
+		if got, want := migrationRowCount(t, ctx, pool), embeddedMigrationCount(t); got != want {
+			t.Errorf("schema_migrations row count after second Migrate = %d, want %d (re-applied instead of skipped)", got, want)
 		}
 
 		for _, table := range wantTables {
@@ -396,6 +403,33 @@ func migrationRowCount(t *testing.T, ctx context.Context, pool interface {
 	var count int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatalf("count schema_migrations rows: %v", err)
+	}
+	return count
+}
+
+// embeddedMigrationCount reports how many .sql files Migrate will apply,
+// read from the same embed.FS Migrate itself walks.
+//
+// Derived rather than written down so adding a migration cannot break a
+// test about idempotency. A hardcoded total says "one migration exists",
+// which is a fact about the repo on the day it was written, not about the
+// behavior under test — the assertion that matters is one row per file.
+func embeddedMigrationCount(t *testing.T) int {
+	t.Helper()
+
+	entries, err := fs.ReadDir(migrationFiles, migrationsDir)
+	if err != nil {
+		t.Fatalf("read embedded migrations: %v", err)
+	}
+
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			count++
+		}
+	}
+	if count == 0 {
+		t.Fatal("no embedded migrations found — the count would trivially match an empty schema_migrations")
 	}
 	return count
 }

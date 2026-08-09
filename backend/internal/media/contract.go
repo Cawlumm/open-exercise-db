@@ -63,7 +63,65 @@ func BuildImages(imgs []model.Image, baseURL string) []contract.Image {
 			ContentType:     img.ContentType,
 			License:         img.License,
 			AttributionText: img.AttributionText,
+			Variants:        buildVariants(img, baseURL),
 		})
 	}
 	return out
+}
+
+// buildVariants renders an image's renditions, preserving the store's
+// full-first ordering.
+//
+// Synthesizes a single "full" entry when the slice is empty. That should not
+// happen — migration 0002 backfilled a variant for every image and every
+// writer since creates one — but the alternative is publishing
+// `"variants": []` next to a perfectly good `url`, which tells a
+// variant-aware client this image has no renditions and invites it to
+// render nothing. The entry it would be describing is exactly what the
+// top-level fields already describe, so synthesizing it costs nothing and
+// cannot be wrong.
+func buildVariants(img model.Image, baseURL string) []contract.ImageVariant {
+	// Empty rather than nil, for the same reason BuildImages avoids a nil
+	// slice: `"variants": null` is a different shape to iterate than `[]`.
+	out := make([]contract.ImageVariant, 0, len(img.Variants))
+
+	if len(img.Variants) == 0 {
+		return append(out, contract.ImageVariant{
+			Name:        model.VariantFull,
+			URL:         ImageURL(baseURL, img.ID, img.StorageKey),
+			Width:       img.Width,
+			Height:      img.Height,
+			ContentType: img.ContentType,
+		})
+	}
+
+	for _, v := range img.Variants {
+		out = append(out, contract.ImageVariant{
+			Name:        v.Name,
+			URL:         VariantURL(baseURL, img.ID, v.Name, v.StorageKey),
+			Width:       v.Width,
+			Height:      v.Height,
+			ContentType: v.ContentType,
+		})
+	}
+	return out
+}
+
+// VariantURL builds the client-fetchable URL for one rendition, resolving
+// the same two ways ImageURL does: straight at object storage when
+// IMAGE_BASE_URL is configured, otherwise through this API.
+//
+// The full rendition deliberately resolves to the same URL ImageURL
+// produces, not to a /full suffix. Two URLs for one set of bytes would
+// split cache entries and make the ETags on Image.url and its full variant
+// incomparable, for no gain — a client wanting the full image already has
+// that URL in the field above.
+func VariantURL(baseURL, imageID, name, storageKey string) string {
+	if name == model.VariantFull {
+		return ImageURL(baseURL, imageID, storageKey)
+	}
+	if baseURL == "" {
+		return "/api/v1/images/" + imageID + "/" + name
+	}
+	return strings.TrimRight(baseURL, "/") + "/" + storageKey
 }

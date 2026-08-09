@@ -312,6 +312,28 @@ Either way `contract.Exercise` doesn't change shape — only which host the URL 
 is exactly the config-not-code seam that lets production adopt OFF's separate-image-host model
 later without touching a client.
 
+#### Renditions (`variants[]`)
+
+Each image also carries `variants[]` — one entry per stored rendition, with its own `name`,
+`url`, `width`, `height`, and `content_type`, `full` first. Today every image has exactly one,
+`full`, whose `url` is byte-identical to the image's own `url`: one set of bytes never lives at
+two cacheable URLs. Individual renditions are fetchable at `GET /images/{id}/{variant}`, and an
+unknown name is a **404, never a fallback to `full`** — a client asking for a thumbnail and
+silently receiving a full-resolution image sees a successful request while downloading many
+times the bytes it budgeted for, on exactly the connections thumbnails exist to protect.
+
+`variants[]` is purely additive: `url`, `width`, `height`, and `content_type` keep describing
+the full rendition exactly as before, so a consumer written against the earlier shape needs no
+change and has no deprecation to track.
+
+The reason this landed before a second size exists is that **a storage key is now data, not a
+derived convention**. The importer used to compute `exercises/<source-id>/<index>.jpg` and
+every reader re-derived the same string — sound for exactly one rendition per image, and a
+bucket-wide rename the moment there are two. `exercise_image_variants` records each rendition's
+key, so added sizes name their own objects and the existing ones never move. That is what keeps
+the production R2 backfill a one-time copy rather than something that has to be redone once
+thumbnails exist.
+
 **Bytes never live in Postgres**, mirroring OFF's own product-image handling: `exercise_images`
 stores metadata only (`storage_key`, `content_type`, dimensions, license/attribution),
 `media.Store` holds the actual bytes — `R2Store` against Cloudflare R2 when the four `R2_*`

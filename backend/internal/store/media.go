@@ -99,13 +99,133 @@ func (s *MediaStore) ListImagesByIDs(ctx context.Context, ids []string) ([]model
 		return nil, fmt.Errorf("list images by ids: %w", err)
 	}
 
+	// Variants in one query for the whole page rather than one per image:
+	// GET /exercises renders up to 2 images for each of 50 exercises, so a
+	// per-image lookup would be 100 round trips on the hottest read path in
+	// the API.
+	variantsByImage, err := s.variantsForImages(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+
 	images := make([]model.Image, 0, len(ids))
 	for _, id := range ids {
 		if img, ok := byID[id]; ok {
+			img.Variants = variantsByImage[img.ID]
 			images = append(images, img)
 		}
 	}
 	return images, nil
+}
+
+// variantColumns is the explicit column list every variant read shares.
+const variantColumns = `id, image_id, name, storage_key, content_type, width, height, created_at`
+
+// variantsForImages returns every variant row for imageIDs, grouped by
+// image id.
+//
+// Ordered so "full" sorts first and the rest alphabetically after it. The
+// ordering is not cosmetic: contract.Image.URL describes the full rendition,
+// and a client reading variants[0] as the primary — which is what a client
+// will do whatever the docs say — gets the same image the URL points at
+// rather than whichever row Postgres happened to return first.
+func (s *MediaStore) variantsForImages(ctx context.Context, imageIDs []string) (map[string][]model.ImageVariant, error) {
+	if len(imageIDs) == 0 {
+		return nil, nil
+	}
+
+	query := fmt.Sprintf(`
+		SELECT %s FROM exercise_image_variants
+		WHERE image_id = ANY($1)
+		ORDER BY (name = $2) DESC, name ASC`, variantColumns)
+
+	rows, err := s.pool.Query(ctx, query, imageIDs, model.VariantFull)
+	if err != nil {
+		return nil, fmt.Errorf("list image variants: %w", err)
+	}
+	defer rows.Close()
+
+	byImage := make(map[string][]model.ImageVariant, len(imageIDs))
+	for rows.Next() {
+		var v model.ImageVariant
+		var imageID string
+		if err := rows.Scan(
+			&v.ID, &imageID, &v.Name, &v.StorageKey, &v.ContentType,
+			&v.Width, &v.Height, &v.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan image variant: %w", err)
+		}
+		byImage[imageID] = append(byImage[imageID], v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list image variants: %w", err)
+	}
+	return byImage, nil
+}
+
+// GetImageVariant resolves one named rendition of an image, returning
+// pgx.ErrNoRows when that image has no variant by that name — which
+// GET /api/v1/images/{id}/{variant} turns into a 404, the same as an
+// unknown image id. Deliberately not falling back to "full" on an unknown
+// name: a client asking for a thumbnail and silently receiving a
+// full-resolution image would see a working request while downloading many
+// times the bytes it budgeted for, on exactly the mobile connections
+// thumbnails exist to protect.
+func (s *MediaStore) GetImageVariant(ctx context.Context, imageID, name string) (model.ImageVariant, error) {
+	query := fmt.Sprintf(`
+		SELECT %s FROM exercise_image_variants
+		WHERE image_id = $1 AND name = $2`, variantColumns)
+
+	var v model.ImageVariant
+	var scannedImageID string
+	err := s.pool.QueryRow(ctx, query, imageID, name).Scan(
+		&v.ID, &scannedImageID, &v.Name, &v.StorageKey, &v.ContentType,
+		&v.Width, &v.Height, &v.CreatedAt,
+	)
+	if err != nil {
+		return model.ImageVariant{}, err
+	}
+	return v, nil
+}
+
+// UpsertImageVariant records (or re-points) one rendition of an image.
+//
+// Keyed on (image_id, name) so re-encoding a variant replaces it rather
+// than accumulating duplicates — the same shape as the importer's other
+// idempotent writes. A storage_key already claimed by a *different* image
+// is rejected by the table's UNIQUE constraint rather than silently
+// re-pointed: two images sharing one object is a corruption that reads as
+// success until one of them is deleted.
+func (s *MediaStore) UpsertImageVariant(ctx context.Context, in UpsertImageVariantInput) (string, error) {
+	var id string
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO exercise_image_variants (image_id, name, storage_key, content_type, width, height)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (image_id, name) DO UPDATE
+		SET storage_key = EXCLUDED.storage_key,
+		    content_type = EXCLUDED.content_type,
+		    width = EXCLUDED.width,
+		    height = EXCLUDED.height
+		RETURNING id`,
+		in.ImageID, in.Name, in.StorageKey, in.ContentType, in.Width, in.Height,
+	).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("upsert image variant (%s, %s): %w", in.ImageID, in.Name, err)
+	}
+	return id, nil
+}
+
+// UpsertImageVariantInput is the set of fields a writer controls for one
+// rendition. No Status: moderation is a property of the image as a whole
+// (exercise_images.status), not of each rendition — approving a thumbnail
+// separately from its full-size original is a distinction with no meaning.
+type UpsertImageVariantInput struct {
+	ImageID     string
+	Name        string
+	StorageKey  string
+	ContentType string
+	Width       *int
+	Height      *int
 }
 
 // InsertImageInput is the set of fields the importer controls when

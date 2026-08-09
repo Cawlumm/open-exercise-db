@@ -63,6 +63,39 @@ type Image struct {
 	ContentType     string  `json:"content_type" doc:"The real, stored content type (e.g. image/jpeg) — never guessed from a file extension"`
 	License         *string `json:"license,omitempty"`
 	AttributionText *string `json:"attribution_text,omitempty"`
+
+	// Variants is purely additive: URL, Width, Height, and ContentType above
+	// keep describing the full rendition exactly as they always have. That
+	// is the whole compatibility story — a consumer written before variants
+	// existed (lyftr included) reads the same fields, gets the same image,
+	// and has nothing to migrate and no deprecation to track.
+	//
+	// Today every image has exactly one entry, "full", carrying the same URL
+	// as the field above. The redundancy is deliberate: a client that
+	// selects a rendition by name works now and keeps working the day
+	// thumbnails land, instead of having to grow a second code path when a
+	// second entry appears.
+	Variants []ImageVariant `json:"variants" doc:"Available renditions, full first. Only full exists today; smaller sizes get added without changing url"`
+}
+
+// ImageVariant is one fetchable rendition of an Image.
+//
+// Carries a resolved URL rather than a storage key or a size token, for the
+// same reason Image does: making the client construct the URL is precisely
+// what the Image type was introduced to stop. A consumer picks the rendition
+// it wants by Name and follows the URL, and stays correct whether those
+// bytes come from an object-store host or from this API's own route.
+//
+// No id: a variant is addressed by its image and name, which is also how
+// the API route spells it (GET /api/v1/images/{id}/{variant}). Publishing a
+// separate identifier would invite consumers to store it, making a re-encode
+// — which legitimately replaces the row — look like a deletion.
+type ImageVariant struct {
+	Name        string `json:"name" doc:"Rendition name — always full today; thumb/medium as they are added"`
+	URL         string `json:"url" doc:"Directly fetchable, resolved exactly as Image.url is"`
+	Width       *int   `json:"width,omitempty"`
+	Height      *int   `json:"height,omitempty"`
+	ContentType string `json:"content_type"`
 }
 
 // Translation renders model.ResolvedTranslation (docs/PHASE1_BUILD_PLAN.md's
