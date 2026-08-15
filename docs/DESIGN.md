@@ -130,7 +130,9 @@ erDiagram
         jsonb payload
         uuid[] image_upload_ids
         uuid[] video_upload_ids
-        uuid submitted_by FK
+        uuid submitted_by FK "null when submitted via an app"
+        uuid submitted_by_app FK "null when submitted by a human directly"
+        text app_user_ref "opaque, app-scoped, never an identity here"
         text status "pending|approved|rejected|needs_changes"
         uuid reviewer_id FK
         text reviewer_notes
@@ -141,6 +143,17 @@ erDiagram
         text username
         text avatar_url
         text role "contributor|moderator|admin"
+    }
+    APPS {
+        uuid id PK
+        text name UK
+        text contact_email
+        text key_id UK
+        text key_hash
+        uuid owner_user_id FK
+        text status "active|suspended"
+        int max_pending
+        int max_per_day
     }
     EXERCISE_IMAGES {
         uuid id PK
@@ -187,6 +200,18 @@ Notes on the structural choices:
   shaped like whatever it'll become, and only `POST /admin/submissions/{id}/approve`
   materializes it. That's the moderation-queue-separate-from-published-data guarantee
   enforced at the schema level, not just by API convention.
+- **A submission is attributed to a person *or* to an app, never neither.** `submitted_by`
+  and `submitted_by_app` are both nullable and exactly one is set — a `CHECK` constraint, not
+  a convention, because "who sent this" is the input to every abuse control downstream.
+  `app_user_ref` is whatever opaque handle the app uses for the human behind the submission.
+  It is deliberately **not** an identity in this system: no row, no email, no login. It exists
+  so a single bad actor inside an app can be blocked without banning the whole app, and so an
+  app can answer "what happened to my edit?" for its own user. Treating it as an identity
+  would drag this project into storing third-party user data it has no reason to hold.
+- **`apps` stores a hashed key, never the key.** `key_id` is the public half sent on every
+  request; `key_hash` is what's compared. `max_pending`/`max_per_day` are per-app because a
+  single app is the aggregate of thousands of humans — a limit sized for one contributor is
+  the wrong limit for lyftr, in both directions.
 - **`taxonomy_terms`/`taxonomy_term_translations`** exists to close a gap Open Food Facts'
   own model exposes: `muscle_group`, `equipment`, `category`, `mechanic`, `force`, `level`
   aren't free text, they're slugs into a small controlled vocabulary that itself gets
@@ -257,7 +282,7 @@ GET /exercises/export                       # pre-generated static JSON, CDN-ser
 GET /meta/muscle-groups | /equipment | /categories | /locales   # ?locale=, ?page=, ?per_page=
 GET /images/{id}                            # re-hosted image bytes — see Images below
 
-# Write — GitHub-OAuth JWT required
+# Write — auth required: GitHub-OAuth JWT (a person) or app credentials (an app)
 POST /submissions                           # { type, locale?, payload, image_upload_ids[], video_upload_ids[] }
 POST /exercises/{id}/submissions            # shorthand: type='edit'
 POST /exercises/{id}/translations           # shorthand: type='translation'
@@ -398,17 +423,68 @@ history) · `/exercises/new` submit form · `/exercises/{slug}/edit` ·
 `/exercises/{slug}/translate/{locale}` side-by-side editor · `/submissions/mine` ·
 `/admin/queue` (moderator+: diff view, approve/reject/request-changes) · `/login`.
 
-**Auth: GitHub OAuth only** (authorization-code flow, not a full GitHub App) — no passwords,
-appropriate for a dev-heavy early contributor base. Bootstrap the first admin via
-`ADMIN_GITHUB_LOGINS`, auto-promoted on first login.
+**Auth: two credential types, one submission pipeline.**
+
+*People* authenticate with **GitHub OAuth** (authorization-code flow, not a full GitHub App) —
+no passwords, appropriate for a dev-heavy early contributor base. Bootstrap the first admin
+via `ADMIN_GITHUB_LOGINS`, auto-promoted on first login.
+
+*Apps* authenticate with **their own credentials** and submit on behalf of their users, who
+have no account here at all. This is Open Food Facts' model, and it exists for a specific
+reason: OFF's contribution volume does not come from people visiting openfoodfacts.org, it
+comes from third-party apps like Yuka whose users never knowingly interact with OFF. An app
+sends its key plus `app_user_ref`, an opaque handle for the human behind the edit.
+
+**GitHub-only auth would have quietly killed in-app contribution.** The first real consumer of
+this API is lyftr, whose users are gym-goers; requiring a GitHub account to fix a typo in an
+exercise description is a wall almost none of them would climb. The failure mode is not that
+contribution is hard — it is that no contribution ever arrives and the cause is invisible,
+because the people who would have contributed simply close the screen. Discovering that after
+building the OAuth-only flow would mean rebuilding the submission path, the schema's
+attribution columns, and every rate limit keyed on user id.
+
+Note the groundwork already half-exists: `internal/api/ratelimit.go` requires an
+`AppName/Version (ContactEmail)` User-Agent, lifted directly from OFF's own convention. That
+identifies apps for *throttling* but stops short of identifying them for *writing*. This
+extends the same idea to the write path rather than inventing a second scheme.
+
+**Review still gates publication.** Adopting OFF's auth model is not adopting OFF's
+publication model — OFF is write-through, where edits go live instantly and moderation is
+cleanup afterward, and this project is not. Guarantee #1 above stands: nothing unreviewed is
+ever published, whether it came from a person or an app. OFF can absorb write-through because
+three million products make any single bad edit statistically invisible; 873 exercises cannot,
+and the first consumer is shipping this data to real users.
+
+The cost of that choice is honest and worth stating: **the maintainer is the throughput
+bottleneck**, and an app with a large user base can generate submissions far faster than one
+person approves them. The escape hatch, when that day comes, is **trust tiers** rather than
+abandoning review — an app with a track record graduates to write-through for low-risk changes
+(translations, typos, filling an empty optional field) while new exercises stay queued. That is
+the same shape as the existing tiered rate limits, and it is deliberately deferred: building it
+before there is any evidence of the bottleneck would be guessing at which changes are actually
+low-risk.
 
 ## Moderation / anti-abuse
 
 Single-maintainer approve/reject queue (`role` field future-proofs adding reviewers).
-GitHub login required to submit (kills anonymous spam), a plain SQL rate-limit (cap pending
-submissions per user, cap per rolling 24h), image/video size caps + mandatory re-encode,
-`go-playground/validator` field validation. Explicitly deferred as premature at this scale:
-CAPTCHA, ML spam detection, trust tiers.
+Authentication required to submit (kills anonymous spam), a plain SQL rate-limit, image/video
+size caps + mandatory re-encode, `go-playground/validator` field validation. Explicitly
+deferred as premature at this scale: CAPTCHA, ML spam detection, trust tiers.
+
+The rate-limit caps — pending submissions and a rolling 24h count — apply **per app** as well
+as per user, from the app's own `max_pending`/`max_per_day` rather than a global constant.
+A per-user limit applied to an app is wrong in both directions at once: it throttles a
+legitimate app with thousands of users down to one person's budget, and it lets a thousand
+bogus `app_user_ref` values through under a single app credential. Two levers, because an app
+misbehaving and a person misbehaving need different responses:
+
+- **Suspend the app** (`apps.status`) — stops everything from that source.
+- **Block one `app_user_ref`** — stops one bad contributor without punishing the app or its
+  other users, which is the whole reason the column exists.
+
+An app's key is revocable and rotatable independently of its submission history: rotating
+`key_id`/`key_hash` leaves every past `submissions.submitted_by_app` reference intact, so
+credential rotation never costs attribution.
 
 ## Alignment with Open Food Facts' actual stack
 
@@ -578,7 +654,7 @@ self-hosting consequences above apply and were accepted deliberately.
 | 0 — Scaffolding | Repo, dual LICENSE, README skeleton + logo, Go module layout, Postgres via Neon, CI | 0.5–1 day |
 | 1 — Data model + bootstrap + read API | All 9 tables (incl. taxonomy + indexes), free-exercise-db importer, all `GET` endpoints incl. pre-generated `/export` + `/meta/locales`, OpenAPI spec + `/docs`, no auth, basic tests | 4–6 days |
 | 1.5 — Seed enrichment (content bar) | Mine exercemus + wger gap-fill, hit the completeness bar, before opening submissions | 2–3 days |
-| 2 — Auth + submissions + moderation (API only) | GitHub OAuth + JWT, upload+encode pipeline, submission/moderation endpoints incl. translations, rate limiting, revert, concurrency test | 5–7 days |
+| 2 — Auth + submissions + moderation (API only) | GitHub OAuth + JWT, app credentials + per-app caps, upload+encode pipeline, submission/moderation endpoints incl. translations, rate limiting, revert, concurrency test | 6–8 days |
 | 3 — Web UI | Cloudflare Pages app consuming the complete API | 5–7 days |
 | 4 — Consumer integrations (e.g. lyftr) | Live-lookup client, denormalized snapshots, debounced search; consumer-side work | 2–4 days per consumer |
 | 5 — Polish / launch | Load test against cost ceilings, revision-history UI polish, contributor stats, OFF-style scheduled bulk exports, README/CONTRIBUTING final pass | 3–5 days |
