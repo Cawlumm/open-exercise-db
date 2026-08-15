@@ -23,6 +23,16 @@ image's current `storage_key`, so **no object moves** — its only effect on
 storage is schema-shaped, which is exactly why it lands before the
 production R2 backfill rather than after it.
 
+`0003_app_submissions.sql` adds `apps` and lets a submission be attributed to
+one instead of to a person, so third-party clients can contribute on behalf of
+users who have no account here (see `docs/DESIGN.md`'s auth section). It is the
+first migration to *relax* an existing constraint — `submissions.submitted_by`
+loses its `NOT NULL` — which is safe here only because the table is empty in
+every environment; the same change against populated data would need the new
+column backfilled first. Two `CHECK`s replace the guarantee that `NOT NULL`
+was carrying: exactly one attribution per row, and `app_user_ref` only
+alongside an app.
+
 ## Migrations run against a lock, and can run concurrently
 
 `Migrate` holds a Postgres advisory lock across the whole check-and-apply, so

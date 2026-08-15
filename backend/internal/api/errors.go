@@ -56,6 +56,16 @@ const (
 	// attempt against the read API gets — a distinct condition from
 	// ErrTypeNotFound, and one a client can act on differently.
 	ErrTypeMethodNotAllowed = errorTypeBase + "method-not-allowed"
+	// ErrTypeUnauthorized is a missing or unusable app credential.
+	ErrTypeUnauthorized = errorTypeBase + "unauthorized"
+	// ErrTypeForbidden is a valid credential that is not permitted to do this
+	// — today, only a suspended app. Deliberately distinct from
+	// ErrTypeUnauthorized because the two demand opposite responses: 401 means
+	// "your credential is wrong, check or rotate it" and retrying with the
+	// same one never succeeds, while 403 means the credential is correct and
+	// rotating it changes nothing. A client that cannot tell them apart either
+	// rotates a working key or emails a maintainer about a typo.
+	ErrTypeForbidden = errorTypeBase + "forbidden"
 )
 
 // problemTypeForStatus maps an HTTP status onto its problem type.
@@ -76,6 +86,10 @@ func problemTypeForStatus(status int) string {
 		return ErrTypeMethodNotAllowed
 	case status == http.StatusTooManyRequests:
 		return ErrTypeRateLimited
+	case status == http.StatusUnauthorized:
+		return ErrTypeUnauthorized
+	case status == http.StatusForbidden:
+		return ErrTypeForbidden
 	case status == http.StatusUnprocessableEntity, status == http.StatusBadRequest:
 		return ErrTypeValidation
 	case status >= 500:

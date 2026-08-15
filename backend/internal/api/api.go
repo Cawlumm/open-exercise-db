@@ -61,6 +61,13 @@ func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter 
 	hapi.UseMiddleware(rateLimitMiddleware(hapi, limiter))
 	hapi.UseMiddleware(rejectNulBytesMiddleware(hapi))
 
+	// App authentication runs after rate limiting, deliberately. An
+	// unauthenticated flood should be rejected by the limiter without ever
+	// reaching a database lookup — putting auth first would make every
+	// discarded request cost a query on apps, turning the credential check
+	// into the cheapest available amplification vector.
+	hapi.UseMiddleware(appAuthMiddleware(hapi, s))
+
 	// registerExportRoutes intentionally comes before registerExerciseRoutes.
 	// GET /api/v1/exercises/export (a static, literal path) and GET
 	// /api/v1/exercises/{id} (a wildcard on the same path depth) would

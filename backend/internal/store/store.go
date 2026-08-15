@@ -14,6 +14,7 @@ type Store struct {
 	Translations *TranslationStore
 	Taxonomy     *TaxonomyStore
 	Media        *MediaStore
+	Apps         *AppStore
 }
 
 // New wires every aggregate store against pool.
@@ -23,6 +24,7 @@ func New(pool *pgxpool.Pool) *Store {
 		Translations: &TranslationStore{pool: pool},
 		Taxonomy:     &TaxonomyStore{pool: pool},
 		Media:        &MediaStore{pool: pool},
+		Apps:         &AppStore{pool: pool},
 	}
 }
 
