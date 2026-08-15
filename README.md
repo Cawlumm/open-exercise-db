@@ -124,7 +124,7 @@ Full spec: `GET /api/v1/openapi.json`, interactive docs at `/docs`.
 GET  /api/v1/exercises              # search/filter/list, public, no auth
 GET  /api/v1/exercises/{id}         # single exercise, ?locale= for translations
 GET  /api/v1/exercises/export       # full catalog dump, for mirrors + offline consumers
-POST /api/v1/submissions            # propose a create/edit/translation (GitHub OAuth required)
+POST /api/v1/submissions            # propose a create/edit/translation (auth required)
 GET  /api/v1/admin/submissions      # moderation queue (moderator+ role)
 ```
 
@@ -148,6 +148,10 @@ See [`docs/DESIGN.md`](docs/DESIGN.md#api-rest-json-apiv1) for the complete endp
 - **Exercise data**: once Phase 2 ships, submit new exercises, edits, or translations through
   the API or web UI — every submission goes through human review before publication. See
   [`CONTRIBUTING.md`](CONTRIBUTING.md) for style guides and the moderation SLA.
+- **From inside your own app**: apps can hold their own credentials and submit on behalf of
+  their users, who need no account here — the model Open Food Facts uses, and how most of its
+  data actually arrives. Submissions carry the app plus an opaque per-user handle, so one bad
+  contributor can be blocked without suspending the app. Review still applies either way.
 
 This is a background, single-maintainer project — moderation turnaround is best-effort, not
 guaranteed. Patience appreciated.
