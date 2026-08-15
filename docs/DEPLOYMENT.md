@@ -14,6 +14,23 @@ GitHub (merge to main) → CI → deploy.yml → Artifact Registry (us-east4)
                                      └── Cloudflare R2   (bucket oedb-media-dev)
 ```
 
+The live resources:
+
+| | |
+|---|---|
+| GCP project | `open-exercise-db` (number `324202275612`) |
+| Region | `us-east4` |
+| Artifact Registry | `oedb` |
+| Cloud Run service | `oedb-api` |
+| Deploy identity | `gh-deploy@open-exercise-db.iam.gserviceaccount.com` |
+| Runtime identity | `oedb-run@open-exercise-db.iam.gserviceaccount.com` |
+| Neon project | `restless-hill-68287324` — Postgres 17, `aws-us-east-1`, database `openexercisedb` |
+| R2 bucket | `oedb-media-dev` |
+
+Connection endpoints and account identifiers are deliberately not written down here — this
+file is destined to be public. They live in Secret Manager (`oedb-database-url`) and in the
+repository's Actions variables (`R2_ACCOUNT_ID`, `R2_BUCKET`).
+
 Region pairing is deliberate. Every API request makes at least one database round trip and
 none of that is cacheable, so origin↔database latency is the dominant term. `us-east4`
 (Ashburn) and Neon's `aws-us-east-1` (N. Virginia) are ~1–2 ms apart; `us-central1` paired
@@ -83,7 +100,10 @@ export GH_REPO="Cawlumm/open-exercise-db"
 
 ```bash
 gcloud projects create "$PROJECT_ID" --name="open-exercise-db"
-gcloud beta billing projects link "$PROJECT_ID" --billing-account="<ACCOUNT>"
+# `gcloud billing`, not `gcloud beta billing`: the beta component is not
+# installed by default, and installing it mid-script fails in non-interactive
+# mode with a CLOUDSDK_PYTHON error. The GA command does the same job.
+gcloud billing projects link "$PROJECT_ID" --billing-account="<ACCOUNT>"
 gcloud config set project "$PROJECT_ID"
 
 export PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
@@ -105,6 +125,11 @@ gcloud artifacts repositories create "$AR_REPO" \
   --repository-format=docker --location="$REGION" \
   --description="open-exercise-db container images"
 ```
+
+Expect this to fail once with `PERMISSION_DENIED` on
+`artifactregistry.repositories.create` if you run it immediately after enabling
+the API — the grant has not propagated yet, even for a project owner. Wait
+20 seconds and re-run rather than going looking for a missing role.
 
 The free tier is **0.5 GB**. This image measures 5.75 MB (verified with `docker inspect`), and
 successive revisions share the distroless base layer, so the incremental cost of a deploy is
@@ -136,6 +161,11 @@ gcloud artifacts repositories set-cleanup-policies "$AR_REPO" \
 `Keep` wins over `Delete` when both match, so the last 10 SHA-tagged images are protected
 while `delete-untagged` reaps what buildx leaves behind. The `type=gha` buildx cache lives in
 GitHub's cache, not here, so it does not count against the 0.5 GB.
+
+On Windows, write that JSON from a shell that does not emit a byte-order mark.
+PowerShell 5.1's `Out-File -Encoding utf8` adds one and gcloud rejects the file
+with `Unexpected UTF-8 BOM`. The bash heredoc above is fine; from PowerShell use
+`[System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))`.
 
 ### Two service accounts, kept distinct
 
