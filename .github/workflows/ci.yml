@@ -86,3 +86,9 @@ jobs:
         with:
           context: ./backend
           push: false
+          # Populated here and consumed by deploy.yml's push build on the same
+          # commit, so the deploy is a cache hit rather than a second full
+          # `go mod download` + compile. Without it every image build starts
+          # cold, in both workflows.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

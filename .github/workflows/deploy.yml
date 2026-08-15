@@ -1,0 +1,267 @@
+name: Deploy
+
+# Deliberately a separate file from ci.yml rather than a job inside it, on blast
+# radius: ci.yml triggers on `push: branches: ['**']` and on `pull_request`, so it
+# runs code from any branch and — once this repo goes public — from forks. Putting
+# `id-token: write` in that file means the workflow that can mint a GCP credential
+# is the same one that runs untrusted code. Job-level `permissions:` does contain
+# that correctly, so it would not be *unsafe*; but "the privileged workflow is a
+# separate file with a separate trigger" is a property you verify by reading one
+# line, versus one you verify by reasoning about every job's `if:` block. For a
+# workflow whose failure mode is "someone else deploys to production", that is
+# worth an extra file.
+#
+# workflow_run, not push: a squash-merge to main creates a NEW sha that ci.yml
+# also runs against, so a push-triggered deploy would race the test suite rather
+# than wait for it. This fires only once CI has reported on this exact commit —
+# the property `needs: test` would have given us had this lived in ci.yml.
+#
+# workflow_dispatch is not a convenience. A workflow_run workflow always executes
+# the copy of itself on the default branch, so this file cannot be exercised from
+# a branch — its first real run is after merge. Manual dispatch is the only way to
+# iterate, and to redeploy current main after a manual traffic rollback.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# cancel-in-progress is deliberately false: cancelling mid-`gcloud run deploy` can
+# leave a revision created but traffic unshifted. A queued second deploy is
+# strictly better than an interrupted first one.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  GCP_PROJECT_ID: open-exercise-db
+  GCP_REGION: us-east4
+  AR_REPO: oedb
+  SERVICE: oedb-api
+  RUNTIME_SA: oedb-run@open-exercise-db.iam.gserviceaccount.com
+
+jobs:
+  deploy:
+    name: Build, push, deploy, smoke
+    # workflow_run fires on failure and cancellation too, not just success.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # Not a manual approval gate — deploying every merge without a human step is
+    # the point, and on a single-maintainer repo the squash-merge is the approval.
+    # The environment earns its place two other ways: its "Deployment branches"
+    # rule refuses a workflow_dispatch from any ref other than main, and GitHub
+    # records deployment history with the live URL.
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+
+    permissions:
+      contents: read
+      id-token: write # mint the OIDC token WIF exchanges for a Google credential
+
+    steps:
+      # workflow_run's github.sha is the default branch tip at dispatch time,
+      # which is not necessarily the commit CI actually tested. head_sha is.
+      # Getting this wrong deploys an untested commit on a busy day, and nothing
+      # anywhere reports it.
+      - name: Resolve the tested commit
+        id: sha
+        run: |
+          set -euo pipefail
+          sha="${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "full=$sha"         >> "$GITHUB_OUTPUT"
+          echo "short=${sha:0:12}" >> "$GITHUB_OUTPUT"
+          echo "deploying $sha"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.sha.outputs.full }}
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+          # Workload Identity Federation: no service-account key is stored in this
+          # repository, which is the entire reason to prefer it. An access token
+          # lets docker/login-action authenticate directly instead of relying on a
+          # gcloud credential helper inside buildx.
+          token_format: access_token
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GCP_REGION }}-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Captured BEFORE the deploy so the rollback step below has a concrete
+      # revision to shift traffic back to. Empty on the very first deploy, which
+      # that step's condition guards for.
+      - name: Record the currently-serving revision
+        id: before
+        run: |
+          set -euo pipefail
+          prev="$(gcloud run services describe "$SERVICE" \
+            --project="$GCP_PROJECT_ID" --region="$GCP_REGION" \
+            --format='value(status.latestReadyRevisionName)' 2>/dev/null || true)"
+          echo "revision=$prev" >> "$GITHUB_OUTPUT"
+          echo "currently serving: ${prev:-<none>}"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          # :<sha> is the immutable thing the revision is pinned to and what a
+          # rollback resolves against. :latest is a mutable convenience tag for
+          # `docker pull` while debugging — it points at the same digest, so it
+          # adds a tag rather than a second image against Artifact Registry's
+          # 0.5GB free tier.
+          tags: |
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/api-server:${{ steps.sha.outputs.full }}
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/api-server:latest
+          platforms: linux/amd64
+          # Consumes the cache ci.yml's docker-build job populated for this same
+          # commit, so this is a near-no-op rather than a second full
+          # `go mod download` + compile.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Cloud Run pulls the image directly and never reads an attestation; a
+          # provenance manifest would just be another untagged version for the
+          # Artifact Registry cleanup policy to reap.
+          provenance: false
+
+      - name: Deploy to Cloud Run
+        id: deploy
+        run: |
+          set -euo pipefail
+          image="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AR_REPO}/api-server:${{ steps.sha.outputs.full }}"
+
+          # --allow-unauthenticated is absent on purpose. It is a service-level IAM
+          # policy, set once by hand at bootstrap and persisting across revisions;
+          # re-setting it here would force the deploy service account to hold
+          # run.services.setIamPolicy, i.e. the power to make this service private.
+          #
+          # --set-env-vars and --set-secrets are FULL REPLACEMENTS ("all existing
+          # will be removed first"), so both must always carry the complete list —
+          # which is why the whole configuration is spelled out here, in git,
+          # rather than inherited from whatever the last deploy happened to set.
+          # In particular all four R2_* values must arrive together: media.NewStore
+          # treats a partial set as a hard startup error, not a fallback.
+          #
+          # PORT is not in --set-env-vars because Cloud Run reserves it and rejects
+          # the deploy; --port is how it is set.
+          #
+          # --max-instances=4 is the database connection ceiling expressed as a
+          # Cloud Run flag. database.Connect clamps MaxConns into [5,10], forcing 10
+          # for anything outside that range, so per-instance connections cannot be
+          # lowered from the DSN. 4 x 10 = 40 leaves room under Neon's limit for a
+          # local importer run and a psql session.
+          gcloud run deploy "$SERVICE" \
+            --project="$GCP_PROJECT_ID" \
+            --region="$GCP_REGION" \
+            --image="$image" \
+            --revision-suffix="${{ steps.sha.outputs.short }}-${{ github.run_number }}" \
+            --service-account="$RUNTIME_SA" \
+            --ingress=all \
+            --port=8080 \
+            --cpu=1 \
+            --memory=512Mi \
+            --concurrency=80 \
+            --min-instances=0 \
+            --max-instances=4 \
+            --timeout=120s \
+            --execution-environment=gen1 \
+            --cpu-boost \
+            --set-env-vars="ENV=production,R2_ACCOUNT_ID=${{ vars.R2_ACCOUNT_ID }},R2_BUCKET=${{ vars.R2_BUCKET }}" \
+            --set-secrets="DATABASE_URL=oedb-database-url:latest,R2_ACCESS_KEY_ID=oedb-r2-access-key-id:latest,R2_SECRET_ACCESS_KEY=oedb-r2-secret-access-key:latest" \
+            --quiet
+
+          url="$(gcloud run services describe "$SERVICE" --project="$GCP_PROJECT_ID" \
+                  --region="$GCP_REGION" --format='value(status.url)')"
+          rev="$(gcloud run services describe "$SERVICE" --project="$GCP_PROJECT_ID" \
+                  --region="$GCP_REGION" --format='value(status.latestReadyRevisionName)')"
+          echo "url=$url"      >> "$GITHUB_OUTPUT"
+          echo "revision=$rev" >> "$GITHUB_OUTPUT"
+          echo "deployed $rev at $url"
+
+      # `gcloud run deploy` exiting 0 proves a revision became ready, which on this
+      # service means the process reached ListenAndServe — so the database
+      # connected, migrations applied, and the media config parsed. It proves
+      # nothing about whether the API serves data, whether R2 is readable, or
+      # whether traffic actually moved. Each assertion below covers one of those.
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          url="${{ steps.deploy.outputs.url }}"
+          # A missing or generic User-Agent drops the caller into the Unidentified
+          # tier (5rpm, burst 2 — see isIdentifiedUA in internal/api/ratelimit.go),
+          # which this handful of requests would trip. Identify properly.
+          UA="oedb-deploy-smoke/1.0 (+https://github.com/${{ github.repository }})"
+          get() { curl -fsS --max-time 25 -H "User-Agent: $UA" "$@"; }
+
+          echo "::group::traffic is on the new revision"
+          gcloud run services describe "$SERVICE" --project="$GCP_PROJECT_ID" \
+            --region="$GCP_REGION" \
+            --format='value(status.traffic[].revisionName,status.traffic[].percent)'
+          serving="$(gcloud run services describe "$SERVICE" --project="$GCP_PROJECT_ID" \
+            --region="$GCP_REGION" --format='value(status.traffic[0].revisionName)')"
+          test "$serving" = "${{ steps.deploy.outputs.revision }}"
+          echo "::endgroup::"
+
+          echo "::group::/health"
+          get "$url/health" | tee /dev/stderr | jq -e '.status == "ok"' > /dev/null
+          echo "::endgroup::"
+
+          echo "::group::real data"
+          get "$url/api/v1/exercises?per_page=1" > list.json
+          jq -e '.total > 800'                      list.json > /dev/null
+          jq -e '.exercises | length == 1'          list.json > /dev/null
+          jq -e '.exercises[0].images | length > 0' list.json > /dev/null
+          get "$url/api/v1/meta/muscle-groups" | jq -e '.terms | length > 0' > /dev/null
+          echo "::endgroup::"
+
+          echo "::group::image bytes come back (proves the R2 credentials work)"
+          # With IMAGE_BASE_URL unset these URLs are relative and resolve through
+          # GET /api/v1/images/{id}, i.e. through media.Store — which is exactly the
+          # path that exercises the runtime R2 credentials. Once IMAGE_BASE_URL
+          # points at a CDN this becomes an absolute URL and this check silently
+          # stops testing the origin; revisit it then.
+          img="$(jq -r '.exercises[0].images[0].url' list.json)"
+          case "$img" in /*) img="${url}${img}" ;; esac
+          curl -fsS --max-time 25 -H "User-Agent: $UA" \
+            -o /dev/null -w 'image: %{http_code} %{content_type} %{size_download}B\n' "$img"
+          echo "::endgroup::"
+
+      # Traffic is already at 100% on the new revision by the time smoke runs, so a
+      # failure means production is broken right now. Shift back immediately rather
+      # than waiting for a human to notice a red X.
+      #
+      # A revision that never became ready needs no rollback: it never passes the
+      # startup probe, never receives traffic, and fails the deploy step instead —
+      # which is why this is conditioned on the deploy having succeeded.
+      - name: Roll back on smoke failure
+        if: failure() && steps.deploy.outcome == 'success' && steps.before.outputs.revision != ''
+        run: |
+          set -euo pipefail
+          echo "smoke failed — reverting traffic to ${{ steps.before.outputs.revision }}"
+          gcloud run services update-traffic "$SERVICE" \
+            --project="$GCP_PROJECT_ID" --region="$GCP_REGION" \
+            --to-revisions="${{ steps.before.outputs.revision }}=100" --quiet
+          gcloud run services describe "$SERVICE" --project="$GCP_PROJECT_ID" \
+            --region="$GCP_REGION" \
+            --format='value(status.traffic[].revisionName,status.traffic[].percent)'

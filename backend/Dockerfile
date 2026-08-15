@@ -17,7 +17,14 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /build/api-server ./cm
 # Stage 2: Runtime — distroless, not alpine: per docs/DESIGN.md's Cloud Run
 # research, image size is the biggest cold-start lever, and a slim distroless
 # image measurably beats an Alpine base on Cloud Run cold starts.
-FROM gcr.io/distroless/static-debian12
+#
+# :nonroot rather than the default (root) tag. The binary is copied world-
+# readable and executable, it binds 8080 so it needs no privileged-port
+# capability, and it writes nothing to disk when object storage is configured —
+# which it always is in production (internal/media/newstore.go). So the tag
+# costs nothing and means a container escape starts as uid 65532 instead of 0.
+# Cloud Run does not require it, which is precisely why it is easy to never do.
+FROM gcr.io/distroless/static-debian12:nonroot
 
 WORKDIR /app
 COPY --from=builder /build/api-server .
