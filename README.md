@@ -160,6 +160,7 @@ Pages, edge cache) hosting.
 
 - Full rationale and alternatives weighed: [`docs/DESIGN.md`](docs/DESIGN.md)
 - Go project layout, layering, and code conventions: [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md)
+- Running it in production — GCP setup, secrets, bootstrap, rollback: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
 
 ## License
 
