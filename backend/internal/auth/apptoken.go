@@ -1,10 +1,16 @@
 // Package auth holds the credential primitives the write API authenticates
 // with, independent of HTTP.
 //
-// Separate from internal/api because there are two consumers, not one: the
-// middleware that verifies a presented credential, and whatever registers an
-// app in the first place (a maintainer CLI today, a self-service flow later).
-// Minting and verifying have to agree exactly, so they live together.
+// Separate from internal/api because minting and verifying have to agree
+// exactly, and the two will not share a caller: the middleware verifies, while
+// registration mints.
+//
+// There is no registration path yet — no cmd/ tool, no endpoint — so
+// GenerateAppCredential currently has no non-test caller. Onboarding an app
+// today means running these functions by hand and inserting the row directly,
+// which is exactly the error-prone thing a registration command should
+// replace. Treat that as the gap it is, not as an interface waiting for a
+// consumer.
 package auth
 
 import (

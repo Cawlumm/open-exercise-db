@@ -195,18 +195,7 @@ func TestAuth_BadCredentialsAllLookAlike(t *testing.T) {
 func TestAuth_SuspendedAppIsForbiddenNotUnauthorized(t *testing.T) {
 	s, testAPI := newAuthTestAPI(t)
 	token := registerTestApp(t, s, "suspended")
-
-	keyID, _, err := auth.ParseToken(token)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	app, err := s.Apps.GetByKeyID(context.Background(), keyID)
-	if err != nil {
-		t.Fatalf("get app: %v", err)
-	}
-	if err := s.Apps.SetStatus(context.Background(), app.ID, "suspended"); err != nil {
-		t.Fatalf("suspend: %v", err)
-	}
+	suspend(t, s, token)
 
 	// 403, not 401: the credential is real, and reporting it invalid would
 	// send the operator hunting for a key problem that does not exist.
@@ -216,6 +205,43 @@ func TestAuth_SuspendedAppIsForbiddenNotUnauthorized(t *testing.T) {
 	)
 	if resp.Code != http.StatusForbidden {
 		t.Fatalf("suspended app status = %d, want 403: %s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestAuth_UntaggedWriteOperationStillRequiresCredential(t *testing.T) {
+	s, _ := newTestStore(t)
+	limiter := ratelimit.NewLimiter(ratelimit.Config{
+		Read: ratelimit.Rule{RPM: 600, Burst: 200}, Search: ratelimit.Rule{RPM: 600, Burst: 200},
+		Export: ratelimit.Rule{RPM: 600, Burst: 200}, Unidentified: ratelimit.Rule{RPM: 600, Burst: 200},
+	})
+	t.Cleanup(limiter.Close)
+	cache := export.NewCache(export.DefaultCacheTTL, "")
+	mediaStore, err := media.NewFilesystemStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("init media store: %v", err)
+	}
+	_, hapi := humatest.New(t)
+	Register(hapi, s, cache, limiter, mediaStore, "")
+
+	// Deliberately registered WITHOUT authRequiredKey — the mistake a future
+	// POST /submissions could make. The default must not be "public", or that
+	// mistake ships a world-writable endpoint with no log, no test failure,
+	// and nothing in review to catch it. The method is what makes it safe,
+	// because nobody can forget to set the method.
+	huma.Register(hapi, huma.Operation{
+		OperationID: "test-untagged-write",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/test-untagged-write",
+		Summary:     "Test-only write operation that forgot its auth tag",
+		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierRead},
+	}, func(_ context.Context, _ *struct{}) (*guardedOutput, error) {
+		return &guardedOutput{}, nil
+	})
+
+	resp := hapi.(humatest.TestAPI).Post("/api/v1/test-untagged-write", "User-Agent: "+testUA)
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("untagged POST status = %d, want 401 — an untagged write must fail closed: %s",
+			resp.Code, resp.Body.String())
 	}
 }
 
@@ -236,17 +262,89 @@ func TestAuth_CredentialOnPublicRouteStillAttributes(t *testing.T) {
 	}
 }
 
-func TestAuth_InvalidCredentialOnPublicRouteIsRejected(t *testing.T) {
+func TestAuth_InvalidCredentialDoesNotBreakPublicReads(t *testing.T) {
 	_, testAPI := newAuthTestAPI(t)
 
-	// Presenting a broken credential is a client error worth reporting even
-	// on a public route — silently ignoring it would leave an app believing
-	// its submissions were attributed when they were anonymous.
-	resp := testAPI.Get("/api/v1/meta/equipment",
+	// The read API has been open to anonymous traffic since Phase 1, and a
+	// client can always reach it by dropping the header. So an unusable
+	// Authorization header — an API gateway injecting its own JWT, an app
+	// forwarding an end-user session token by mistake — must not take reads
+	// away. There is no attribution at stake on a GET; the credential only
+	// has to be valid where it is actually consumed.
+	for _, header := range []string{
+		"Authorization: Bearer oedb_nope.nope",
+		"Authorization: Bearer some.other.jwt",
+		"Authorization: Bearer " + strings.Repeat("x", 200),
+	} {
+		resp := testAPI.Get("/api/v1/meta/equipment", "User-Agent: "+testUA, header)
+		if resp.Code != http.StatusOK {
+			t.Errorf("%s -> status %d, want 200: %s", header, resp.Code, resp.Body.String())
+		}
+	}
+
+	// The same credential on an operation that requires one is still a 401.
+	resp := testAPI.Get(testGuardedPath,
 		"User-Agent: "+testUA,
 		"Authorization: Bearer oedb_nope.nope",
 	)
 	if resp.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401: %s", resp.Code, resp.Body.String())
+		t.Fatalf("guarded route status = %d, want 401: %s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestAuth_SuspensionDoesNotBreakPublicReads(t *testing.T) {
+	s, testAPI := newAuthTestAPI(t)
+	token := registerTestApp(t, s, "suspended-reader")
+	suspend(t, s, token)
+
+	// Suspension is a write-side lever (model.App, migration 0003). Enforcing
+	// it on reads would turn one moderation decision into a total blackout for
+	// every user of that app — while the identical request still succeeds by
+	// dropping the header, which makes it useless as a control and harmful as
+	// an outage.
+	resp := testAPI.Get("/api/v1/meta/equipment",
+		"User-Agent: "+testUA,
+		"Authorization: Bearer "+token,
+	)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("suspended app read status = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestAuth_ErrorsCarryProblemTypeURIs(t *testing.T) {
+	s, testAPI := newAuthTestAPI(t)
+
+	// `detail` is prose and will be reworded; `type` is the stable thing a
+	// client branches on. These two errors demand opposite responses —
+	// rotate the credential versus contact the maintainer — so a client that
+	// cannot tell them apart either rotates a working key or emails about a
+	// typo.
+	unauth := testAPI.Get(testGuardedPath, "User-Agent: "+testUA)
+	if !strings.Contains(unauth.Body.String(), ErrTypeUnauthorized) {
+		t.Errorf("401 body has no %s type URI: %s", ErrTypeUnauthorized, unauth.Body.String())
+	}
+
+	token := registerTestApp(t, s, "suspended-type")
+	suspend(t, s, token)
+	forbidden := testAPI.Get(testGuardedPath, "User-Agent: "+testUA, "Authorization: Bearer "+token)
+	if !strings.Contains(forbidden.Body.String(), ErrTypeForbidden) {
+		t.Errorf("403 body has no %s type URI: %s", ErrTypeForbidden, forbidden.Body.String())
+	}
+}
+
+// suspend puts the app owning token into the suspended state.
+func suspend(t *testing.T, s *store.Store, token string) {
+	t.Helper()
+
+	keyID, _, err := auth.ParseToken(token)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	app, err := s.Apps.GetByKeyID(context.Background(), keyID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if err := s.Apps.SetStatus(context.Background(), app.ID, "suspended"); err != nil {
+		t.Fatalf("suspend: %v", err)
 	}
 }

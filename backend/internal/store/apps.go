@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,9 +18,9 @@ type AppStore struct {
 }
 
 // appColumns is the explicit column list every app read shares. key_hash is
-// absent on purpose: it is only ever needed by GetKeyHashByKeyID, which asks
-// for it by name, so no ordinary read can accidentally carry the secret
-// material into a log line or an error string.
+// absent on purpose: only GetByKeyIDWithHash asks for it, and it returns the
+// hash as a separate value rather than on model.App, so no ordinary read can
+// carry secret material into a log line or an error string.
 const appColumns = `id, name, contact_email, key_id, owner_user_id, status, max_pending, max_per_day, created_at, updated_at`
 
 // GetByKeyID resolves the public half of an app credential to its row, or
@@ -44,20 +45,34 @@ func (s *AppStore) GetByKeyID(ctx context.Context, keyID string) (model.App, err
 	return a, nil
 }
 
-// GetKeyHashByKeyID returns only the stored hash for a key_id, for the caller
-// to compare against a presented secret.
+// GetByKeyIDWithHash returns the app row together with its stored key hash,
+// or pgx.ErrNoRows when no app claims that key_id.
 //
-// Separate from GetByKeyID so the hash is fetched deliberately rather than
-// riding along on every app read. The comparison itself belongs to the caller
-// (internal/api's auth middleware) because it owns the hashing scheme; this
-// package's job is storage, and putting the verification here would mean the
-// store had to know how secrets are derived.
-func (s *AppStore) GetKeyHashByKeyID(ctx context.Context, keyID string) (string, error) {
+// One query rather than two, because authenticating a request needs both and
+// this is the hot path for the entire write API: a split would double the
+// pool round trips per authenticated request, which is exactly the cost
+// internal/api orders its middleware to avoid.
+//
+// The hash is returned rather than compared here on purpose. Verification
+// belongs to the caller (internal/api's auth middleware) because that is what
+// owns the hashing scheme; this package's job is storage, and putting the
+// comparison here would mean the store had to know how secrets are derived.
+// Returning it separately from model.App keeps it off the struct, so no
+// ordinary app read can carry secret material into a log line.
+func (s *AppStore) GetByKeyIDWithHash(ctx context.Context, keyID string) (model.App, string, error) {
+	query := fmt.Sprintf(`SELECT %s, key_hash FROM apps WHERE key_id = $1`, appColumns)
+
+	var a model.App
 	var hash string
-	if err := s.pool.QueryRow(ctx, `SELECT key_hash FROM apps WHERE key_id = $1`, keyID).Scan(&hash); err != nil {
-		return "", err
+	err := s.pool.QueryRow(ctx, query, keyID).Scan(
+		&a.ID, &a.Name, &a.ContactEmail, &a.KeyID, &a.OwnerUserID,
+		&a.Status, &a.MaxPending, &a.MaxPerDay, &a.CreatedAt, &a.UpdatedAt,
+		&hash,
+	)
+	if err != nil {
+		return model.App{}, "", err
 	}
-	return hash, nil
+	return a, hash, nil
 }
 
 // CreateAppInput is the set of fields a caller controls when registering an
@@ -71,30 +86,47 @@ type CreateAppInput struct {
 	KeyHash      string
 	OwnerUserID  *string
 
-	// Zero means "use the schema default" rather than "no submissions
-	// allowed", which a CHECK (> 0) would reject anyway. Callers that want
-	// the defaults leave these unset instead of duplicating the numbers.
-	MaxPending int
-	MaxPerDay  int
+	// Nil means "use whatever the schema says", not "zero" — a CHECK (> 0)
+	// would reject zero anyway. Pointers rather than an int with a sentinel
+	// so that omitting the columns entirely is expressible, which is what
+	// keeps the actual numbers in the migration.
+	MaxPending *int
+	MaxPerDay  *int
 }
 
 // CreateApp registers an app and returns the stored row.
 //
 // The caller supplies KeyHash, never a secret — this package never sees the
 // credential it is storing a hash of.
+//
+// Unset caps are omitted from the INSERT rather than defaulted here, so the
+// column DEFAULTs in migration 0003 actually apply. Naming a fallback in Go —
+// even via COALESCE — would silently shadow the schema: raising a default by
+// appending a migration would then change nothing for newly registered apps,
+// and the mismatch would surface much later as an integration hitting a cap
+// the operator is certain they raised.
 func (s *AppStore) CreateApp(ctx context.Context, in CreateAppInput) (model.App, error) {
-	// NULLIF(...,0) lets the column defaults apply for unset caps, so the
-	// numbers live in the migration rather than being restated here where
-	// they could drift.
-	query := fmt.Sprintf(`
-		INSERT INTO apps (name, contact_email, key_id, key_hash, owner_user_id, max_pending, max_per_day)
-		VALUES ($1, $2, $3, $4, $5, COALESCE(NULLIF($6, 0), 50), COALESCE(NULLIF($7, 0), 200))
-		RETURNING %s`, appColumns)
+	cols := []string{"name", "contact_email", "key_id", "key_hash", "owner_user_id"}
+	args := []any{in.Name, in.ContactEmail, in.KeyID, in.KeyHash, in.OwnerUserID}
+	if in.MaxPending != nil {
+		cols = append(cols, "max_pending")
+		args = append(args, *in.MaxPending)
+	}
+	if in.MaxPerDay != nil {
+		cols = append(cols, "max_per_day")
+		args = append(args, *in.MaxPerDay)
+	}
+
+	placeholders := make([]string, len(args))
+	for i := range args {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+	}
+
+	query := fmt.Sprintf(`INSERT INTO apps (%s) VALUES (%s) RETURNING %s`,
+		strings.Join(cols, ", "), strings.Join(placeholders, ", "), appColumns)
 
 	var a model.App
-	err := s.pool.QueryRow(ctx, query,
-		in.Name, in.ContactEmail, in.KeyID, in.KeyHash, in.OwnerUserID, in.MaxPending, in.MaxPerDay,
-	).Scan(
+	err := s.pool.QueryRow(ctx, query, args...).Scan(
 		&a.ID, &a.Name, &a.ContactEmail, &a.KeyID, &a.OwnerUserID,
 		&a.Status, &a.MaxPending, &a.MaxPerDay, &a.CreatedAt, &a.UpdatedAt,
 	)
@@ -148,23 +180,34 @@ type AppUsage struct {
 // UsageFor counts an app's outstanding and recent submissions, optionally
 // narrowed to one of the app's own users.
 //
-// Both counts in one round trip because they are always needed together — a
-// submission is refused if either is over — and because two separate queries
-// could observe different states either side of a concurrent insert, which
-// would let a burst slip through the pair.
+// All three counts in one round trip because they are always needed together
+// — a submission is refused if any is over — and because separate queries
+// could observe different states either side of a concurrent insert, letting
+// a burst slip through the gap.
 //
-// appUserRef may be empty, in which case PerRefID is zero and only the
-// app-wide caps are populated.
+// Written as three scalar subqueries rather than one scan with count(*)
+// FILTER clauses. A FILTER is evaluated per row *after* the scan, so the
+// window predicate could not use idx_submissions_app_created_at and every cap
+// check read the app's entire submission history — a cost that grows with an
+// app's success, on the path it hits hardest. Each subquery below carries its
+// own WHERE, so the planner can restrict on the matching index.
+//
+// appUserRef may be empty, in which case PerRefID is zero: NULLIF turns it
+// into a NULL that `app_user_ref = NULL` never matches. That is a sargable
+// way to express "app-wide only" — a `$3 <> ”` guard inside the predicate
+// would defeat the index for every caller, including the ones that do pass a
+// ref.
 func (s *AppStore) UsageFor(ctx context.Context, appID, appUserRef string, window time.Duration) (AppUsage, error) {
 	var u AppUsage
 	err := s.pool.QueryRow(ctx, `
 		SELECT
-			count(*) FILTER (WHERE status = 'pending'),
-			count(*) FILTER (WHERE created_at > now() - $2::interval),
-			count(*) FILTER (WHERE created_at > now() - $2::interval
-			                   AND $3 <> '' AND app_user_ref = $3)
-		FROM submissions
-		WHERE submitted_by_app = $1`,
+			(SELECT count(*) FROM submissions
+			  WHERE submitted_by_app = $1 AND status = 'pending'),
+			(SELECT count(*) FROM submissions
+			  WHERE submitted_by_app = $1 AND created_at > now() - $2::interval),
+			(SELECT count(*) FROM submissions
+			  WHERE submitted_by_app = $1 AND created_at > now() - $2::interval
+			    AND app_user_ref = NULLIF($3, ''))`,
 		appID, window, appUserRef,
 	).Scan(&u.Pending, &u.LastDay, &u.PerRefID)
 	if err != nil {

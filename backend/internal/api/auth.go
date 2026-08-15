@@ -15,19 +15,48 @@ import (
 	"github.com/Cawlumm/open-exercise-db/internal/store"
 )
 
-// authRequiredKey is the huma.Operation.Metadata key a write operation sets
-// to mark itself as requiring a credential, mirroring rateLimitTierKey's
-// tagging scheme in ratelimit.go.
+// authRequiredKey is the huma.Operation.Metadata key an operation sets to
+// mark itself as requiring a credential, mirroring rateLimitTierKey's tagging
+// scheme in ratelimit.go.
 //
-// Opt-in rather than opt-out, the reverse of the rate limiter's fail-closed
-// default, because the two failure modes are not symmetric here. Every
-// operation in this package today is a public read; defaulting to "auth
-// required" would mean a forgotten tag takes the public API offline, while
-// defaulting to "public" means a forgotten tag on a *write* leaves it open.
-// The second is the more dangerous error — so writes do not rely on the
-// default at all: registerWrite below sets the tag, and no write operation is
-// registered any other way.
+// The tag is how an operation opts *in*, but it is not the only thing that
+// makes a credential required — see authRequiredFor. A safe default cannot
+// come from the tag alone in either direction: defaulting every untagged
+// operation to "auth required" would take the public read API offline the
+// first time someone forgot a tag, and defaulting to "public" would leave a
+// forgotten write world-writable. Neither is acceptable, so the default is
+// derived from the HTTP method instead, which no one can forget to set.
 const authRequiredKey = "oedb-auth-required"
+
+// safeMethods are the HTTP methods that never modify state, per RFC 9110 §9.2.1.
+// An operation using one of these is public unless it tags itself otherwise;
+// anything else requires a credential whether it remembered to say so or not.
+var safeMethods = map[string]bool{
+	http.MethodGet:     true,
+	http.MethodHead:    true,
+	http.MethodOptions: true,
+}
+
+// authRequiredFor decides whether an operation needs a credential.
+//
+// An explicit tag wins, so a read operation can opt into requiring one. With
+// no tag, a non-safe method requires auth by construction — this is the
+// fail-closed default that makes forgetting the tag on a future
+// POST /submissions a 401 rather than an open write endpoint. It is logged
+// as well as enforced, because relying on the default is a mistake even when
+// it happens to be safe: the tag documents intent at the registration site,
+// and an operation reaching here untagged means nobody stated one.
+func authRequiredFor(op *huma.Operation) bool {
+	if tagged, ok := op.Metadata[authRequiredKey].(bool); ok {
+		return tagged
+	}
+	if safeMethods[op.Method] {
+		return false
+	}
+	log.Printf("auth: operation %s (%s) has no %s metadata tag; requiring a credential because %s is not a safe method",
+		op.OperationID, op.Method, authRequiredKey, op.Method)
+	return true
+}
 
 // appContextKey is where an authenticated app is stashed for handlers.
 type appContextKey struct{}
@@ -59,7 +88,7 @@ func AppFromContext(ctx context.Context) (model.App, bool) {
 // where a write demands it, and is where suspension is enforced.
 func appAuthMiddleware(hapi huma.API, s *store.Store) func(huma.Context, func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
-		required, _ := ctx.Operation().Metadata[authRequiredKey].(bool)
+		required := authRequiredFor(ctx.Operation())
 
 		token, present := bearerToken(ctx.Header("Authorization"))
 		if !present {
@@ -73,18 +102,43 @@ func appAuthMiddleware(hapi huma.API, s *store.Store) func(huma.Context, func(hu
 		}
 
 		app, err := authenticateApp(ctx, s, token)
-		if err != nil {
-			if errors.Is(err, errBadCredential) {
-				// Deliberately one message for a malformed token, an unknown
-				// key id, and a wrong secret. Distinguishing them tells an
-				// attacker which half of a guess was right, and tells a
-				// legitimate operator nothing they can act on differently —
-				// in every case the answer is "check the credential".
-				huma.WriteErr(hapi, ctx, http.StatusUnauthorized, "invalid app credential")
-				return
-			}
+		switch {
+		case err == nil && app.Active():
+			next(huma.WithValue(ctx, appContextKey{}, app))
+			return
+
+		case err != nil && !errors.Is(err, errBadCredential):
+			// A real failure — the database is unreachable, not the
+			// credential wrong. Never downgrade this to a 401: telling an app
+			// its key is invalid during an outage sends it rotating a
+			// perfectly good credential.
 			log.Printf("app auth: %v", err)
 			huma.WriteErr(hapi, ctx, http.StatusInternalServerError, "internal error")
+			return
+		}
+
+		// From here the credential is either unusable or belongs to a
+		// suspended app. On an operation that does not need one, neither is
+		// this request's problem: the read API has been open to anonymous
+		// traffic since Phase 1, and a client that attaches an unrelated
+		// Authorization header — an API gateway injecting its own JWT, an app
+		// forwarding an end-user session token by mistake — must not lose
+		// access to reads it could make by simply dropping the header.
+		// Suspension in particular is a write-side lever (see model.App and
+		// migration 0003); enforcing it here would turn a moderation decision
+		// into a total read blackout for that app's users.
+		if !required {
+			next(ctx)
+			return
+		}
+
+		if err != nil {
+			// Deliberately one message for a malformed token, an unknown key
+			// id, and a wrong secret. Distinguishing them tells an attacker
+			// which half of a guess was right, and tells a legitimate
+			// operator nothing they can act on differently — in every case
+			// the answer is "check the credential".
+			huma.WriteErr(hapi, ctx, http.StatusUnauthorized, "invalid app credential")
 			return
 		}
 
@@ -92,13 +146,8 @@ func appAuthMiddleware(hapi huma.API, s *store.Store) func(huma.Context, func(hu
 		// real. Saying "invalid credential" here would send its operator
 		// hunting for a key problem that does not exist, so this is a
 		// distinct 403 with a reason they can act on.
-		if !app.Active() {
-			huma.WriteErr(hapi, ctx, http.StatusForbidden,
-				"this app is suspended and cannot submit; contact the maintainer listed in docs/API_POLICY.md")
-			return
-		}
-
-		next(huma.WithValue(ctx, appContextKey{}, app))
+		huma.WriteErr(hapi, ctx, http.StatusForbidden,
+			"this app is suspended and cannot submit; contact the maintainer listed in docs/API_POLICY.md")
 	}
 }
 
@@ -108,13 +157,17 @@ func appAuthMiddleware(hapi huma.API, s *store.Store) func(huma.Context, func(hu
 var errBadCredential = errors.New("bad app credential")
 
 // authenticateApp resolves a presented token to its app row.
+//
+// A single store call fetches the row and its hash together: this runs on
+// every authenticated request, and two round trips here would halve the rate
+// the connection pool can sustain.
 func authenticateApp(ctx huma.Context, s *store.Store, token string) (model.App, error) {
 	keyID, secret, err := auth.ParseToken(token)
 	if err != nil {
 		return model.App{}, errBadCredential
 	}
 
-	hash, err := s.Apps.GetKeyHashByKeyID(ctx.Context(), keyID)
+	app, hash, err := s.Apps.GetByKeyIDWithHash(ctx.Context(), keyID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Verify against a hash that cannot match, rather than returning
@@ -129,17 +182,6 @@ func authenticateApp(ctx huma.Context, s *store.Store, token string) (model.App,
 
 	if !auth.VerifySecret(secret, hash) {
 		return model.App{}, errBadCredential
-	}
-
-	app, err := s.Apps.GetByKeyID(ctx.Context(), keyID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// The row existed a moment ago and does not now — deleted
-			// mid-request. Treat as a bad credential rather than a 500: the
-			// credential genuinely is no longer valid.
-			return model.App{}, errBadCredential
-		}
-		return model.App{}, err
 	}
 	return app, nil
 }

@@ -90,18 +90,37 @@ ALTER TABLE submissions ADD CONSTRAINT submissions_one_attribution CHECK (
 -- Without this, a human submission carrying a stray app_user_ref would be
 -- accepted and then counted by the per-app-user blocking logic against an app
 -- that never sent it.
+--
+-- Non-empty for the same reason every other text column on `apps` is: an
+-- empty ref is not a contributor. Left unconstrained, an app could send
+-- app_user_ref = '' on every submission and the per-contributor counter would
+-- have nothing to key on — the rows are indistinguishable from each other, so
+-- the cap can never fire and the only remaining lever is suspending the whole
+-- app, which is precisely the outcome the two-lever design exists to avoid.
+-- NULL stays legal: it means "no per-user attribution offered", which is a
+-- different claim from "this user has no name".
 ALTER TABLE submissions ADD CONSTRAINT submissions_app_user_ref_requires_app CHECK (
-    app_user_ref IS NULL OR submitted_by_app IS NOT NULL
+    app_user_ref IS NULL
+    OR (submitted_by_app IS NOT NULL AND length(trim(app_user_ref)) > 0)
 );
 
--- Serves both per-app caps: the pending count filters on status, and the
--- rolling-24h count filters on created_at. Leading with submitted_by_app
--- because every such query is scoped to one app first.
+-- One index per cap query, each leading with submitted_by_app because every
+-- such query is scoped to one app first.
+--
+-- These are only usable because store.AppStore.UsageFor expresses each count
+-- as its own subquery with its own WHERE. An earlier draft wrote all three as
+-- count(*) FILTER over a single scan, which Postgres evaluates per row after
+-- the fact: the indexes existed, matched the comment, and pruned nothing,
+-- leaving every cap check to read the app's entire submission history. If
+-- that query is ever collapsed back into FILTER clauses, these become dead
+-- weight rather than a speedup.
 CREATE INDEX idx_submissions_app_status ON submissions (submitted_by_app, status);
 CREATE INDEX idx_submissions_app_created_at ON submissions (submitted_by_app, created_at);
 
 -- Blocking a single contributor inside an app is a lookup on the pair, not on
 -- app_user_ref alone — the same ref string from two different apps refers to
--- two unrelated people, and must never collide.
-CREATE INDEX idx_submissions_app_user_ref ON submissions (submitted_by_app, app_user_ref)
+-- two unrelated people, and must never collide. created_at is included
+-- because the per-contributor count is windowed exactly like the app-wide
+-- one, so this serves the whole predicate rather than half of it.
+CREATE INDEX idx_submissions_app_user_ref ON submissions (submitted_by_app, app_user_ref, created_at)
     WHERE app_user_ref IS NOT NULL;
