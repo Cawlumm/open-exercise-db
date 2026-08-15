@@ -388,6 +388,13 @@ which requires `run.services.setIamPolicy`, a permission deliberately withheld f
 account — and it means finding out whether Neon and R2 are wired correctly in a terminal
 rather than through a workflow log.
 
+Run the push from a shell that has `gcloud` on its `PATH`. `configure-docker` installs a
+credential *helper* rather than a stored password, so a shell that cannot find
+`docker-credential-gcloud` fails the push with `Unauthenticated request ... does not have
+permission "artifactregistry.repositories.uploadArtifacts"` — which reads like a missing IAM
+role and is not one. On Windows that means PowerShell after the installer's `PATH` update, not
+a Git Bash session started earlier.
+
 ```bash
 gcloud auth configure-docker "${REGION}-docker.pkg.dev"
 
