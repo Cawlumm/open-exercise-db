@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/jackc/pgx/v5"
@@ -58,8 +59,74 @@ func authRequiredFor(op *huma.Operation) bool {
 	return true
 }
 
+// roleRequiredKey is the huma.Operation.Metadata key an operation sets to
+// demand a minimum role. Only meaningful for user credentials: an app has no
+// role and can never satisfy one, which is deliberate — moderation is a
+// judgement a person makes, and an app holding a credential is not a person.
+const roleRequiredKey = "oedb-role-required"
+
+// AuthConfig is the authentication settings Register needs.
+//
+// A struct rather than more positional parameters: Register already takes six,
+// and sign-in adds a secret plus an OAuth client that several handlers need.
+// Grouping them means adding the next auth setting does not touch every call
+// site again.
+type AuthConfig struct {
+	// JWTSecret signs session tokens and OAuth state. Empty disables user
+	// authentication entirely — app credentials still work, which is what
+	// keeps most tests from needing to care.
+	JWTSecret string
+
+	// GitHubOAuth is the sign-in client. Its zero value is "not configured",
+	// and the sign-in routes report that as unavailable rather than failing
+	// as though the user did something wrong.
+	GitHubOAuth auth.GitHubOAuth
+
+	// AdminGitHubLogins is the raw ADMIN_GITHUB_LOGINS value. Parsed at
+	// sign-in rather than at startup so changing it takes effect on the next
+	// login without a redeploy — which matters when the reason you are
+	// changing it is that you locked yourself out.
+	AdminGitHubLogins string
+}
+
 // appContextKey is where an authenticated app is stashed for handlers.
 type appContextKey struct{}
+
+// userContextKey is where an authenticated person is stashed for handlers.
+type userContextKey struct{}
+
+// UserFromContext returns the person that authenticated this request, if any.
+//
+// Mutually exclusive with AppFromContext: a request carries one credential, so
+// at most one of these returns a value. A handler that needs "whoever this is"
+// should check both rather than assuming, and a handler that only makes sense
+// for one should say so by checking only that one.
+func UserFromContext(ctx context.Context) (model.User, bool) {
+	u, ok := ctx.Value(userContextKey{}).(model.User)
+	return u, ok
+}
+
+// roleRequiredFor returns the minimum role an operation demands, or "".
+func roleRequiredFor(op *huma.Operation) string {
+	role, _ := op.Metadata[roleRequiredKey].(string)
+	return role
+}
+
+// satisfiesRole reports whether u meets a required role.
+func satisfiesRole(u model.User, required string) bool {
+	switch required {
+	case "":
+		return true
+	case model.RoleModerator:
+		return u.CanModerate()
+	case model.RoleAdmin:
+		return u.IsAdmin()
+	default:
+		// An unknown role requirement denies rather than allows. A typo in a
+		// metadata tag must not silently open a moderation endpoint.
+		return false
+	}
+}
 
 // AppFromContext returns the app that authenticated this request, if any.
 //
@@ -86,34 +153,64 @@ func AppFromContext(ctx context.Context) (model.App, bool) {
 // every request that presents one, so reads can be attributed later without a
 // second code path. Authorization ("may this app write right now?") runs only
 // where a write demands it, and is where suspension is enforced.
-func appAuthMiddleware(hapi huma.API, s *store.Store) func(huma.Context, func(huma.Context)) {
+func appAuthMiddleware(hapi huma.API, s *store.Store, cfg AuthConfig) func(huma.Context, func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
-		required := authRequiredFor(ctx.Operation())
+		op := ctx.Operation()
+		required := authRequiredFor(op)
+		requiredRole := roleRequiredFor(op)
 
 		token, present := bearerToken(ctx.Header("Authorization"))
 		if !present {
 			if required {
 				huma.WriteErr(hapi, ctx, http.StatusUnauthorized,
-					"this endpoint requires an app credential: send `Authorization: Bearer <token>` — see docs/API_POLICY.md")
+					"this endpoint requires a credential: send `Authorization: Bearer <token>` — see docs/API_POLICY.md")
 				return
 			}
 			next(ctx)
 			return
 		}
 
-		app, err := authenticateApp(ctx, s, token)
+		app, user, err := authenticate(ctx, s, cfg, token)
 		switch {
-		case err == nil && app.Active():
-			next(huma.WithValue(ctx, appContextKey{}, app))
-			return
-
 		case err != nil && !errors.Is(err, errBadCredential):
 			// A real failure — the database is unreachable, not the
-			// credential wrong. Never downgrade this to a 401: telling an app
-			// its key is invalid during an outage sends it rotating a
+			// credential wrong. Never downgrade this to a 401: telling a
+			// caller its key is invalid during an outage sends it rotating a
 			// perfectly good credential.
-			log.Printf("app auth: %v", err)
+			log.Printf("auth: %v", err)
 			huma.WriteErr(hapi, ctx, http.StatusInternalServerError, "internal error")
+			return
+
+		case err == nil && user != nil:
+			if !satisfiesRole(*user, requiredRole) {
+				if !required {
+					next(ctx)
+					return
+				}
+				// The credential is real and the person is who they say they
+				// are; they simply are not a moderator. Distinct from 401 for
+				// the same reason suspension is: rotating a token changes
+				// nothing here.
+				huma.WriteErr(hapi, ctx, http.StatusForbidden,
+					"this endpoint requires the "+requiredRole+" role")
+				return
+			}
+			next(huma.WithValue(ctx, userContextKey{}, *user))
+			return
+
+		case err == nil && app != nil && app.Active():
+			// An app can never satisfy a role requirement — it is not a
+			// person, and moderation is a judgement a person makes.
+			if requiredRole != "" {
+				if !required {
+					next(ctx)
+					return
+				}
+				huma.WriteErr(hapi, ctx, http.StatusForbidden,
+					"this endpoint requires the "+requiredRole+" role, which an app credential cannot hold")
+				return
+			}
+			next(huma.WithValue(ctx, appContextKey{}, *app))
 			return
 		}
 
@@ -133,12 +230,13 @@ func appAuthMiddleware(hapi huma.API, s *store.Store) func(huma.Context, func(hu
 		}
 
 		if err != nil {
-			// Deliberately one message for a malformed token, an unknown key
-			// id, and a wrong secret. Distinguishing them tells an attacker
-			// which half of a guess was right, and tells a legitimate
-			// operator nothing they can act on differently — in every case
-			// the answer is "check the credential".
-			huma.WriteErr(hapi, ctx, http.StatusUnauthorized, "invalid app credential")
+			// Deliberately one message for every failure — a malformed token,
+			// an unknown key id, a wrong secret, an expired session, a forged
+			// signature. Distinguishing them tells an attacker which half of
+			// a guess was right, and would also reveal whether a given token
+			// is an app credential or a user session. In every case the
+			// answer is "check the credential".
+			huma.WriteErr(hapi, ctx, http.StatusUnauthorized, "invalid credential")
 			return
 		}
 
@@ -149,6 +247,58 @@ func appAuthMiddleware(hapi huma.API, s *store.Store) func(huma.Context, func(hu
 		huma.WriteErr(hapi, ctx, http.StatusForbidden,
 			"this app is suspended and cannot submit; contact the maintainer listed in docs/API_POLICY.md")
 	}
+}
+
+// authenticate resolves a presented token to whichever kind of principal it
+// names. Exactly one of the returned pointers is non-nil on success.
+//
+// The token's own prefix selects the path, which leaks nothing — the client
+// sent it. What matters is that both paths fail identically, so a caller
+// cannot learn from a rejection whether the value it guessed was even the
+// right *kind* of credential.
+func authenticate(ctx huma.Context, s *store.Store, cfg AuthConfig, token string) (*model.App, *model.User, error) {
+	if strings.HasPrefix(token, auth.AppTokenPrefix) {
+		app, err := authenticateApp(ctx, s, token)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &app, nil, nil
+	}
+
+	user, err := authenticateUser(ctx, s, cfg, token)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, &user, nil
+}
+
+// authenticateUser verifies a session token and loads the person it names.
+//
+// The user is loaded on every request rather than trusted from the token,
+// because the token carries no role (see auth.Claims). That is one indexed
+// lookup in exchange for a demotion or a deleted account taking effect
+// immediately instead of whenever the token happened to expire.
+func authenticateUser(ctx huma.Context, s *store.Store, cfg AuthConfig, token string) (model.User, error) {
+	claims, err := auth.VerifyUserToken(cfg.JWTSecret, token, time.Now())
+	if err != nil {
+		// An unset secret means sign-in is not configured on this deployment.
+		// It is still a bad credential from the caller's perspective — there
+		// is no session to have — and reporting it distinctly would advertise
+		// the misconfiguration to anyone who asked.
+		return model.User{}, errBadCredential
+	}
+
+	user, err := s.Users.GetByID(ctx.Context(), claims.Subject)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// A validly-signed token for an account that no longer exists.
+			// Deleting a user must revoke their sessions immediately, which
+			// is exactly what this does.
+			return model.User{}, errBadCredential
+		}
+		return model.User{}, err
+	}
+	return user, nil
 }
 
 // errBadCredential covers every way a presented credential fails to identify

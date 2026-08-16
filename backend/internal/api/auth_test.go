@@ -52,7 +52,7 @@ func newAuthTestAPI(t *testing.T) (*store.Store, humatest.TestAPI) {
 	}
 
 	_, hapi := humatest.New(t)
-	Register(hapi, s, cache, limiter, mediaStore, "")
+	Register(hapi, s, cache, limiter, mediaStore, "", AuthConfig{})
 
 	huma.Register(hapi, huma.Operation{
 		OperationID: "test-guarded",
@@ -221,7 +221,7 @@ func TestAuth_UntaggedWriteOperationStillRequiresCredential(t *testing.T) {
 		t.Fatalf("init media store: %v", err)
 	}
 	_, hapi := humatest.New(t)
-	Register(hapi, s, cache, limiter, mediaStore, "")
+	Register(hapi, s, cache, limiter, mediaStore, "", AuthConfig{})
 
 	// Deliberately registered WITHOUT authRequiredKey — the mistake a future
 	// POST /submissions could make. The default must not be "public", or that

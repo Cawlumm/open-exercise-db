@@ -43,7 +43,7 @@ func newRegisteredTestAPI(t *testing.T, cfg ratelimit.Config) humatest.TestAPI {
 		t.Fatalf("init media store: %v", err)
 	}
 	_, hapi := humatest.New(t)
-	Register(hapi, s, cache, limiter, mediaStore, "")
+	Register(hapi, s, cache, limiter, mediaStore, "", AuthConfig{})
 
 	return hapi.(humatest.TestAPI)
 }

@@ -50,7 +50,7 @@ const cacheControl = "public, max-age=300, stale-while-revalidate=86400"
 // every operation below — docs/PHASE1_BUILD_PLAN.md WO-7's rate limiting
 // and User-Agent policy apply uniformly to every GET this package exposes,
 // not opted into per-route.
-func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter *ratelimit.Limiter, mediaStore media.Store, imageBaseURL string) {
+func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter *ratelimit.Limiter, mediaStore media.Store, imageBaseURL string, authCfg AuthConfig) {
 	// Rate limiting first. Putting the NUL check ahead of it looked like a
 	// courtesy — reject malformed input without spending the caller's budget —
 	// but it created an unmetered request path: a client looping on
@@ -66,9 +66,12 @@ func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter 
 	// reaching a database lookup — putting auth first would make every
 	// discarded request cost a query on apps, turning the credential check
 	// into the cheapest available amplification vector.
-	hapi.UseMiddleware(appAuthMiddleware(hapi, s))
+	hapi.UseMiddleware(appAuthMiddleware(hapi, s, authCfg))
 
 	registerSubmissionRoutes(hapi, s)
+	registerAuthRoutes(hapi, s, authCfg)
+	registerAdminAppRoutes(hapi, s)
+	registerModerationRoutes(hapi, s)
 
 	// registerExportRoutes intentionally comes before registerExerciseRoutes.
 	// GET /api/v1/exercises/export (a static, literal path) and GET

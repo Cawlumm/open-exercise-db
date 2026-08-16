@@ -19,8 +19,13 @@ type Config struct {
 	// GitHub OAuth (Phase 2).
 	GitHubClientID     string
 	GitHubClientSecret string
-	JWTSecret          string
-	AdminGitHubLogins  string
+	// GitHubRedirectURL must match the callback registered on the GitHub
+	// OAuth app exactly, including scheme and path — GitHub compares it
+	// literally and rejects a mismatch with an error the user sees rather
+	// than the operator.
+	GitHubRedirectURL string
+	JWTSecret         string
+	AdminGitHubLogins string
 
 	// Cloudflare R2 object storage (Phase 2).
 	R2AccountID       string
@@ -116,6 +121,7 @@ func Load() Config {
 
 		GitHubClientID:     os.Getenv("GITHUB_OAUTH_CLIENT_ID"),
 		GitHubClientSecret: os.Getenv("GITHUB_OAUTH_CLIENT_SECRET"),
+		GitHubRedirectURL:  os.Getenv("GITHUB_OAUTH_REDIRECT_URL"),
 		JWTSecret:          os.Getenv("JWT_SECRET"),
 		AdminGitHubLogins:  os.Getenv("ADMIN_GITHUB_LOGINS"),
 
@@ -213,38 +219,51 @@ func (c Config) Warnings() []string {
 	// did not. Saying so is the difference between "not built yet" and
 	// "built and protecting you", which is not a distinction to leave to a
 	// reader of the source.
-	if unused := c.unusedAuthSettings(); len(unused) > 0 {
+	if missing := c.incompleteOAuth(); len(missing) > 0 {
 		out = append(out, fmt.Sprintf(
-			"%s set but currently unused: authentication is not implemented yet "+
-				"(Phase 2), so these values gate nothing and secure nothing. Every "+
-				"endpoint is public and read-only by design — see docs/API_POLICY.md.",
-			strings.Join(unused, ", "),
+			"GitHub sign-in is partially configured (missing %s): /api/v1/auth/github "+
+				"will report 503 until every one of GITHUB_OAUTH_CLIENT_ID, "+
+				"GITHUB_OAUTH_CLIENT_SECRET, GITHUB_OAUTH_REDIRECT_URL and JWT_SECRET is set. "+
+				"App credentials are unaffected.",
+			strings.Join(missing, ", "),
 		))
 	}
 
 	return out
 }
 
-// unusedAuthSettings names the auth-related settings that are populated but
-// wired to nothing. Kept as a list rather than a bool so the warning can say
-// which ones the operator actually set, rather than making them guess which
-// of four it means.
-func (c Config) unusedAuthSettings() []string {
-	var set []string
-	for _, s := range []struct {
+// incompleteOAuth names the sign-in settings still missing, but only when the
+// operator has clearly started configuring it. Returns nothing when all four
+// are unset, because that is a deliberate choice — a self-hoster who wants no
+// sign-in should not be nagged about a feature they declined.
+//
+// A list rather than a bool so the warning can name what is missing. The
+// half-configured case is the one worth warning about at all: it looks
+// configured, and fails only when somebody tries to sign in.
+func (c Config) incompleteOAuth() []string {
+	settings := []struct {
 		name  string
 		value string
 	}{
-		{"JWT_SECRET", c.JWTSecret},
 		{"GITHUB_OAUTH_CLIENT_ID", c.GitHubClientID},
 		{"GITHUB_OAUTH_CLIENT_SECRET", c.GitHubClientSecret},
-		{"ADMIN_GITHUB_LOGINS", c.AdminGitHubLogins},
-	} {
-		if strings.TrimSpace(s.value) != "" {
-			set = append(set, s.name)
+		{"GITHUB_OAUTH_REDIRECT_URL", c.GitHubRedirectURL},
+		{"JWT_SECRET", c.JWTSecret},
+	}
+
+	var missing []string
+	anySet := false
+	for _, s := range settings {
+		if strings.TrimSpace(s.value) == "" {
+			missing = append(missing, s.name)
+		} else {
+			anySet = true
 		}
 	}
-	return set
+	if !anySet {
+		return nil
+	}
+	return missing
 }
 
 // resolveMediaDir converts dir to an absolute path, so where images actually

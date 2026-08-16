@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,6 +11,14 @@ import (
 
 	"github.com/Cawlumm/open-exercise-db/internal/model"
 )
+
+// ErrNoSuchApp is returned by the update methods when no row matched.
+//
+// A sentinel rather than a formatted string, because the API layer has to turn
+// it into a 404 and matching on message text is a test that passes until
+// somebody rewords an error. An UPDATE affecting no rows is not a failed scan,
+// so pgx.ErrNoRows is not available to mean this.
+var ErrNoSuchApp = errors.New("no such app")
 
 // AppStore holds every query touching `apps`, plus the per-app submission
 // counts the write path checks before accepting anything.
@@ -36,6 +45,21 @@ func (s *AppStore) GetByKeyID(ctx context.Context, keyID string) (model.App, err
 
 	var a model.App
 	err := s.pool.QueryRow(ctx, query, keyID).Scan(
+		&a.ID, &a.Name, &a.ContactEmail, &a.KeyID, &a.OwnerUserID,
+		&a.Status, &a.MaxPending, &a.MaxPerDay, &a.CreatedAt, &a.UpdatedAt,
+	)
+	if err != nil {
+		return model.App{}, err
+	}
+	return a, nil
+}
+
+// GetByID returns an app by its primary key, or pgx.ErrNoRows.
+func (s *AppStore) GetByID(ctx context.Context, id string) (model.App, error) {
+	query := fmt.Sprintf(`SELECT %s FROM apps WHERE id = $1`, appColumns)
+
+	var a model.App
+	err := s.pool.QueryRow(ctx, query, id).Scan(
 		&a.ID, &a.Name, &a.ContactEmail, &a.KeyID, &a.OwnerUserID,
 		&a.Status, &a.MaxPending, &a.MaxPerDay, &a.CreatedAt, &a.UpdatedAt,
 	)
@@ -144,7 +168,7 @@ func (s *AppStore) SetStatus(ctx context.Context, id, status string) error {
 		return fmt.Errorf("set app %s status: %w", id, err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("set app %s status: no such app", id)
+		return fmt.Errorf("set app %s status: %w", id, ErrNoSuchApp)
 	}
 	return nil
 }
@@ -164,7 +188,7 @@ func (s *AppStore) RotateKey(ctx context.Context, id, keyID, keyHash string) err
 		return fmt.Errorf("rotate app %s key: %w", id, err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("rotate app %s key: no such app", id)
+		return fmt.Errorf("rotate app %s key: %w", id, ErrNoSuchApp)
 	}
 	return nil
 }

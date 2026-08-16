@@ -16,6 +16,8 @@ type Store struct {
 	Media        *MediaStore
 	Apps         *AppStore
 	Submissions  *SubmissionStore
+	Users        *UserStore
+	Moderation   *ModerationStore
 }
 
 // New wires every aggregate store against pool.
@@ -27,6 +29,8 @@ func New(pool *pgxpool.Pool) *Store {
 		Media:        &MediaStore{pool: pool},
 		Apps:         &AppStore{pool: pool},
 		Submissions:  &SubmissionStore{pool: pool},
+		Users:        &UserStore{pool: pool},
+		Moderation:   &ModerationStore{pool: pool},
 	}
 }
 
