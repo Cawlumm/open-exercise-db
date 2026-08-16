@@ -58,5 +58,5 @@ func TestRegister_DoesNotPanic(t *testing.T) {
 		t.Fatalf("init media store: %v", err)
 	}
 
-	Register(hapi, s, cache, limiter, mediaStore, "")
+	Register(hapi, s, cache, limiter, mediaStore, "", AuthConfig{})
 }

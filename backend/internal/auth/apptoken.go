@@ -33,8 +33,13 @@ import (
 // commit, a paste — and makes it obvious what a stray string is. The dot
 // separates the two halves, and is safe as a separator precisely because both
 // halves are base64url, whose alphabet excludes it.
+// AppTokenPrefix marks a string as an app credential. Exported because the
+// API layer dispatches on it to decide which kind of principal a bearer token
+// names, and because it makes a leaked credential greppable.
+const AppTokenPrefix = "oedb_"
+
 const (
-	tokenPrefix = "oedb_"
+	tokenPrefix = AppTokenPrefix
 	tokenSep    = "."
 
 	// 16 bytes of key id: enough that ids never collide, short enough to read

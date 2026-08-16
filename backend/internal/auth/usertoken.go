@@ -140,6 +140,11 @@ func VerifyUserToken(secret, token string, now time.Time) (Claims, error) {
 	return claims, nil
 }
 
+// TokenTTL is how long a freshly minted session lasts, exported so the
+// sign-in response can tell a client when to expect a 401 rather than making
+// it discover the expiry by being rejected.
+func TokenTTL() time.Duration { return tokenTTL }
+
 func sign(secret, signing string) []byte {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(signing))

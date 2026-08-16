@@ -18,6 +18,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
 	"github.com/Cawlumm/open-exercise-db/internal/api"
+	"github.com/Cawlumm/open-exercise-db/internal/auth"
 	"github.com/Cawlumm/open-exercise-db/internal/config"
 	"github.com/Cawlumm/open-exercise-db/internal/database"
 	"github.com/Cawlumm/open-exercise-db/internal/export"
@@ -156,8 +157,22 @@ func main() {
 	// where "/" resolves to rather than changing any routing.
 	humaConfig.Servers = []*huma.Server{{URL: "/", Description: "Same origin as the API"}}
 
+	// Sign-in is optional. A self-hoster who sets no OAuth credentials gets a
+	// working read API and a 503 on /auth/github, rather than a service that
+	// refuses to start over a feature they may not want.
+	authCfg := api.AuthConfig{
+		JWTSecret:         cfg.JWTSecret,
+		AdminGitHubLogins: cfg.AdminGitHubLogins,
+		GitHubOAuth: auth.GitHubOAuth{
+			ClientID:     cfg.GitHubClientID,
+			ClientSecret: cfg.GitHubClientSecret,
+			RedirectURL:  cfg.GitHubRedirectURL,
+			Endpoints:    auth.DefaultGitHubEndpoints(),
+		},
+	}
+
 	hapi := humago.New(mux, humaConfig)
-	api.Register(hapi, stores, exportCache, limiter, mediaStore, cfg.ImageBaseURL)
+	api.Register(hapi, stores, exportCache, limiter, mediaStore, cfg.ImageBaseURL, authCfg)
 
 	server := &http.Server{
 		Addr: ":" + cfg.Port,
