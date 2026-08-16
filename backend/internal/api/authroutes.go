@@ -17,6 +17,19 @@ import (
 	"github.com/Cawlumm/open-exercise-db/internal/store"
 )
 
+// signInTier is what /auth/github and its callback are budgeted at.
+//
+// Not the export tier, which was the first choice and was wrong: a single
+// sign-in attempt costs two requests against it, so burst 2 meant anyone who
+// abandoned a login and started again was throttled on their second attempt —
+// found by walking the flow by hand rather than by any test.
+//
+// The search tier instead. The callback does cost a round trip to GitHub, but
+// it cannot be reached without a state this API signed and issued within the
+// last ten minutes, so the expensive half is already gated behind the cheap
+// half.
+const signInTier = ratelimit.TierSearch
+
 // Me is the public shape of the signed-in person.
 //
 // GitHubID is deliberately absent: it identifies the account on another
@@ -62,7 +75,7 @@ func registerAuthRoutes(hapi huma.API, s *store.Store, cfg AuthConfig) {
 		Description: "Redirects to GitHub. Only people sign in; apps authenticate with their own credentials instead.",
 		Tags:        []string{"auth"},
 		Metadata: map[string]any{
-			rateLimitTierKey: ratelimit.TierExport,
+			rateLimitTierKey: signInTier,
 			authRequiredKey:  false,
 		},
 		Errors: []int{http.StatusServiceUnavailable, http.StatusTooManyRequests},
@@ -90,7 +103,7 @@ func registerAuthRoutes(hapi huma.API, s *store.Store, cfg AuthConfig) {
 		Description: "Exchanges the authorization code for a session token.",
 		Tags:        []string{"auth"},
 		Metadata: map[string]any{
-			rateLimitTierKey: ratelimit.TierExport,
+			rateLimitTierKey: signInTier,
 			authRequiredKey:  false,
 		},
 		Errors: []int{
@@ -166,7 +179,10 @@ func registerAuthRoutes(hapi huma.API, s *store.Store, cfg AuthConfig) {
 		Description: "Echoes the signed-in person, including their current role.",
 		Tags:        []string{"auth"},
 		Metadata: map[string]any{
-			rateLimitTierKey: ratelimit.TierExport,
+			// One indexed lookup, so the read tier. It shared the export
+			// tier briefly, which put a trivial identity echo on the same
+			// 5/min budget as the 1.8MB full-dataset dump.
+			rateLimitTierKey: ratelimit.TierRead,
 			// A GET the method default would leave public, so it says so
 			// explicitly: there is no sensible anonymous answer.
 			authRequiredKey: true,
