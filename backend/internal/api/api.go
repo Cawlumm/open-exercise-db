@@ -71,6 +71,7 @@ func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter 
 	registerSubmissionRoutes(hapi, s)
 	registerAuthRoutes(hapi, s, authCfg)
 	registerAdminAppRoutes(hapi, s)
+	registerModerationRoutes(hapi, s)
 
 	// registerExportRoutes intentionally comes before registerExerciseRoutes.
 	// GET /api/v1/exercises/export (a static, literal path) and GET
