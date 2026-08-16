@@ -38,7 +38,11 @@ type httptestResponse struct {
 	Body string
 }
 
-const validPayload = `{"name":"Cable Fly","muscle_group":"chest","instructions":["Stand between the cables."]}`
+// A complete exercise. It gained category and equipment when submit-time
+// validation landed: the old fixture was missing both, which validation
+// correctly rejects — a create that cannot say what kind of exercise it is or
+// what it needs is not a usable submission.
+const validPayload = `{"name":"Cable Fly","muscle_group":"chest","category":"strength","equipment":"cable","instructions":["Stand between the cables."]}`
 
 func TestCreateSubmission_RequiresCredential(t *testing.T) {
 	_, testAPI := newAuthTestAPI(t)

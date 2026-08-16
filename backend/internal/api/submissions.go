@@ -3,11 +3,13 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Cawlumm/open-exercise-db/internal/contract"
 	"github.com/Cawlumm/open-exercise-db/internal/model"
@@ -109,6 +111,30 @@ func registerSubmissionRoutes(hapi huma.API, s *store.Store) {
 
 		if err := validateSubmissionBody(in); err != nil {
 			return nil, err
+		}
+		// Field-level validation against the live vocabulary. Structural
+		// checks above only prove the payload is a JSON object; this is what
+		// keeps a muscle group nobody can filter by out of the queue.
+		// Translations are exempt: they carry a name and instructions in
+		// another language, not taxonomy, and running them through the
+		// English vocabulary would reject every one of them.
+		if in.Body.Type != model.SubmissionTypeTranslation {
+			if err := validatePayloadFields(ctx, s, in.Body.Type, in.Body.Payload); err != nil {
+				return nil, err
+			}
+		}
+
+		// A target that does not exist is the caller's mistake, not a server
+		// fault. Left unchecked the insert violates the foreign key and
+		// surfaces as a 500, telling an integrator their request broke the
+		// server when they simply named a stale id.
+		if in.Body.TargetExerciseID != nil {
+			if _, err := s.Exercises.Get(ctx, *in.Body.TargetExerciseID); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil, huma.Error422UnprocessableEntity("target_exercise_id names no exercise")
+				}
+				return nil, mapStoreError(err, "")
+			}
 		}
 
 		usage, err := s.Apps.UsageFor(ctx, app.ID, derefOr(in.Body.AppUserRef, ""), capWindow)
