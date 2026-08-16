@@ -68,6 +68,8 @@ func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter 
 	// into the cheapest available amplification vector.
 	hapi.UseMiddleware(appAuthMiddleware(hapi, s))
 
+	registerSubmissionRoutes(hapi, s)
+
 	// registerExportRoutes intentionally comes before registerExerciseRoutes.
 	// GET /api/v1/exercises/export (a static, literal path) and GET
 	// /api/v1/exercises/{id} (a wildcard on the same path depth) would
