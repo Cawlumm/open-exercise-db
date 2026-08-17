@@ -296,3 +296,43 @@ func (s *MediaStore) UpdateImageEncoding(ctx context.Context, id, contentType st
 	}
 	return nil
 }
+
+// CountPendingUploadsByApp counts an app's images still awaiting review.
+//
+// Keyed through submissions rather than a column on exercise_images, because
+// an image knows nothing about who uploaded it: uploaded_by references users,
+// and an app is not a user. Counting the pending images an app has *referenced*
+// plus those it has uploaded-but-not-referenced would need that column; until
+// there is a reason to add one, the prefix on storage_key is what ties an
+// upload to its uploader, and it is exact because uploadStorageKey builds it.
+func (s *MediaStore) CountPendingUploadsByApp(ctx context.Context, appID string) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM exercise_images
+		WHERE status = 'pending' AND storage_key LIKE 'uploads/' || $1 || '/%'`, appID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count pending uploads for app %s: %w", appID, err)
+	}
+	return n, nil
+}
+
+// CountImagesOwnedByApp counts how many of ids are pending uploads from appID.
+//
+// Both conditions matter. Restricting to this app's storage-key prefix is what
+// stops one app attaching another's upload; restricting to pending is what
+// stops an already-published image being re-attached to a fresh submission,
+// which would republish it under new attribution.
+func (s *MediaStore) CountImagesOwnedByApp(ctx context.Context, appID string, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	var n int
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM exercise_images
+		WHERE id = ANY($1) AND status = 'pending'
+		  AND storage_key LIKE 'uploads/' || $2 || '/%'`, ids, appID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count images owned by app %s: %w", appID, err)
+	}
+	return n, nil
+}

@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Cawlumm/open-exercise-db/internal/contract"
+	"github.com/Cawlumm/open-exercise-db/internal/export"
 	"github.com/Cawlumm/open-exercise-db/internal/model"
 	"github.com/Cawlumm/open-exercise-db/internal/ratelimit"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
@@ -145,7 +146,7 @@ type RevertOutput struct {
 	}
 }
 
-func registerModerationRoutes(hapi huma.API, s *store.Store) {
+func registerModerationRoutes(hapi huma.API, s *store.Store, exportCache *export.Cache) {
 	huma.Register(hapi, huma.Operation{
 		OperationID: "list-submission-queue",
 		Method:      http.MethodGet,
@@ -238,6 +239,14 @@ func registerModerationRoutes(hapi huma.API, s *store.Store) {
 			return nil, mapModerationError(err)
 		}
 
+		// Approval is the only thing that changes published data, so it is
+		// the only thing that has to tell the export cache. Without this
+		// /exercises/export keeps serving the pre-approval dataset for up to
+		// DefaultCacheTTL — and mirrors, which consume the dump precisely so
+		// they need not poll, take that stale copy as authoritative and have
+		// no way to know a newer one exists.
+		exportCache.Invalidate()
+
 		out := &ApproveOutput{}
 		out.Body.SubmissionID = in.ID
 		out.Body.ExerciseID = res.ExerciseID
@@ -319,6 +328,14 @@ func registerModerationRoutes(hapi huma.API, s *store.Store) {
 			}
 			out.Body.Outcomes = append(out.Body.Outcomes, outcome)
 		}
+
+		// Once for the batch rather than once per item: rebuilding is a full
+		// table scan, and doing it fifty times for one bulk approval would
+		// turn a convenience into the most expensive endpoint here. Only
+		// approvals publish anything; a bulk rejection changes nothing public.
+		if out.Body.Succeeded > 0 && in.Body.Action == "approve" {
+			exportCache.Invalidate()
+		}
 		return out, nil
 	})
 
@@ -341,6 +358,9 @@ func registerModerationRoutes(hapi huma.API, s *store.Store) {
 			}
 			return nil, mapModerationError(err)
 		}
+		// A revert changes what /exercises returns, so the dump has to follow.
+		exportCache.Invalidate()
+
 		out := &RevertOutput{}
 		out.Body.ExerciseID = in.ID
 		out.Body.RevisionID = in.RevisionID

@@ -33,8 +33,10 @@ Full design rationale, data model, and phased build plan: **[`docs/DESIGN.md`](d
 ## Status
 
 Phase 1 (data model, read API, the free-exercise-db bootstrap import, and public-API
-hardening) is implemented and runnable via the Quickstart below — no auth, no submissions, no
-web UI yet. Every `GET` endpoint is rate-limited and requires a `User-Agent`; see
+hardening) is done and deployed. Phase 2 — GitHub sign-in, app credentials, the submission
+queue, moderation, payload validation and image upload — is implemented and runnable via the
+Quickstart below. There is no web UI yet, so moderation is API-only.
+Every `GET` endpoint is rate-limited and requires a `User-Agent`; see
 [`docs/API_POLICY.md`](docs/API_POLICY.md) for the published limits, the `User-Agent` format,
 debounce guidance for search, and how to request a higher limit.
 See [`docs/DESIGN.md`](docs/DESIGN.md) and [`docs/PHASE1_BUILD_PLAN.md`](docs/PHASE1_BUILD_PLAN.md)
@@ -124,9 +126,17 @@ Full spec: `GET /api/v1/openapi.json`, interactive docs at `/docs`.
 GET  /api/v1/exercises              # search/filter/list, public, no auth
 GET  /api/v1/exercises/{id}         # single exercise, ?locale= for translations
 GET  /api/v1/exercises/export       # full catalog dump, for mirrors + offline consumers
+GET  /api/v1/images/{id}            # image bytes; only approved images are public
+POST /api/v1/images                 # upload an image, re-encoded on arrival (app credential)
 POST /api/v1/submissions            # propose a create/edit/translation (auth required)
+GET  /api/v1/submissions/mine       # your own submissions and their outcomes
+GET  /api/v1/auth/github            # sign in with GitHub (people, not apps)
 GET  /api/v1/admin/submissions      # moderation queue (moderator+ role)
 ```
+
+Nothing a contributor sends is public when they send it. A submission waits in the queue, and
+an uploaded image is fetchable only by a moderator until the submission using it is approved —
+so an unreviewed photograph cannot be served from this API by anyone who knows its id.
 
 **Two ways to consume it**, pick whichever fits: query the API live at use time (like apps
 consume Open Food Facts), or pull the bulk dump and mirror it locally. Live is simplest and
@@ -145,9 +155,11 @@ See [`docs/DESIGN.md`](docs/DESIGN.md#api-rest-json-apiv1) for the complete endp
 ## Contribute
 
 - **Code**: standard fork + PR flow, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
-- **Exercise data**: once Phase 2 ships, submit new exercises, edits, or translations through
-  the API or web UI — every submission goes through human review before publication. See
-  [`CONTRIBUTING.md`](CONTRIBUTING.md) for style guides and the moderation SLA.
+- **Exercise data**: submit new exercises, edits, or translations through the API — every
+  submission goes through human review before publication, and images are re-encoded on upload
+  (which also strips EXIF, so a gym photo does not publish the GPS coordinates it was taken at).
+  See [`CONTRIBUTING.md`](CONTRIBUTING.md) for style guides and the moderation SLA. A web UI is
+  Phase 3.
 - **From inside your own app**: apps can hold their own credentials and submit on behalf of
   their users, who need no account here — the model Open Food Facts uses, and how most of its
   data actually arrives. Submissions carry the app plus an opaque per-user handle, so one bad
