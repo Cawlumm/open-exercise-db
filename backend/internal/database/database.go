@@ -16,7 +16,7 @@ var migrationFiles embed.FS
 
 const migrationsDir = "migrations"
 
-// maxConnsCeiling and maxConnsFloor bound the pool size to Neon's free-tier
+// maxConnsCeiling and maxConnsFloor bound the pool size to the managed provider's
 // connection limit (docs/DESIGN.md -> Performance). A dsn that doesn't
 // specify pool_max_conns, or specifies one outside this range, gets clamped
 // rather than trusted, so a stray local .env value can't exhaust the free

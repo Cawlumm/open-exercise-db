@@ -106,7 +106,7 @@ surface and binary small, which is the Cloud Run cold-start argument from `docs/
 **`backend/internal/database/database.go`**
 
 - `Connect(ctx, dsn) (*pgxpool.Pool, error)` — pool with `MaxConns` capped low (5–10) per
-  `DESIGN.md`'s Neon free-tier note, plus a health-check ping.
+  `DESIGN.md`'s free-tier connection note, plus a health-check ping.
 - `Migrate(ctx, pool) error` — `//go:embed migrations/*.sql`, applies files in lexical order
   inside a transaction each, tracked in a `schema_migrations (version TEXT PRIMARY KEY,
   applied_at TIMESTAMPTZ)` table. Already-applied files are skipped.

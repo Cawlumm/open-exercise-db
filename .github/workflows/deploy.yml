@@ -177,7 +177,7 @@ jobs:
           # --max-instances=4 is the database connection ceiling expressed as a
           # Cloud Run flag. database.Connect clamps MaxConns into [5,10], forcing 10
           # for anything outside that range, so per-instance connections cannot be
-          # lowered from the DSN. 4 x 10 = 40 leaves room under Neon's limit for a
+          # lowered from the DSN. 4 x 10 = 40 leaves room under the pooler's limit for a
           # local importer run and a psql session.
           gcloud run deploy "$SERVICE" \
             --project="$GCP_PROJECT_ID" \

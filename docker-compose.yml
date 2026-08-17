@@ -1,4 +1,4 @@
-# Local dev stack: Postgres + the Go API. Production targets Neon (managed
+# Local dev stack: Postgres + the Go API. Production targets Supabase (managed
 # Postgres) + Google Cloud Run instead — see docs/DESIGN.md's Hosting section.
 # This compose file also doubles as the self-host scale-up path described
 # there (e.g. on an Oracle Always Free VM) if this project ever outgrows the

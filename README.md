@@ -170,7 +170,7 @@ guaranteed. Patience appreciated.
 
 ## Stack
 
-Go + [huma v2](https://huma.rocks/) (OpenAPI 3.1 generated from types) + Postgres (Neon)
+Go + [huma v2](https://huma.rocks/) (OpenAPI 3.1 generated from types) + Postgres (Supabase)
 backend, React + Vite + TypeScript web UI (Phase 3), Google Cloud Run + Cloudflare (R2,
 Pages, edge cache) hosting.
 
