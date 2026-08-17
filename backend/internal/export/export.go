@@ -133,10 +133,14 @@ func (c *Cache) expired(blob *Blob) bool {
 	return c.ttl > 0 && time.Since(blob.BuiltAt) >= c.ttl
 }
 
-// Invalidate forces the next Get to rebuild regardless of TTL. Not called
-// from anywhere in Phase 1 — see Cache's doc comment — but tests use it to
-// force a deterministic rebuild instead of racing a timer, and it's the
-// hook Phase 2's submission-approval flow will call.
+// Invalidate forces the next Get to rebuild regardless of TTL.
+//
+// Called by internal/api whenever published data changes: approving a
+// submission, approving a batch, or reverting an exercise. Rejection does not
+// call it, because rejecting publishes nothing.
+//
+// Tests also use it to force a deterministic rebuild rather than racing a
+// timer.
 func (c *Cache) Invalidate() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
