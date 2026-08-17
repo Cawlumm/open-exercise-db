@@ -72,34 +72,50 @@ interval.** Both burn the same budget from different directions:
   rate-limited and consumes a pool connection per call.
 - Neon's free tier allows 100 CU-hours per month. Anything that keeps the database awake
   continuously costs roughly 182 CU-hours/month and exhausts it in about a week — *quietly*,
-  because the API keeps working right up until it doesn't. Monitor `GET /` (which touches no
-  database) or poll `/health` at 10–15 minute intervals.
+  because the API keeps working right up until it doesn't. **Monitor `GET /`, which touches no
+  database.** Do not put `/health` on a schedule at all: see rule 3b for why even a 15-minute
+  interval spends most of the monthly allowance.
 
-**3b. Autosuspend is 60 seconds, and that number is a budget decision.** Neon's default is
-300 seconds, which sounds harmless and is not: it is five minutes of billed compute after every
-burst of traffic, on a free tier of 100 CU-hours per month. At 0.25 CU a single visitor per
-five minutes would keep the endpoint awake continuously — roughly 182 CU-hours/month, i.e. the
-allowance gone in about a week. Sixty seconds means an idle database is genuinely idle.
+**3b. Autosuspend is 300 seconds and cannot be changed on this plan. Budget around it.**
 
-The cost is paid on the *next* request: a suspended endpoint has to wake, so the first call
-after a quiet period runs 1–4 seconds instead of milliseconds. That is why the rule above says
-no liveness probe — a probe would both keep the endpoint awake *and* restart the container when
-the wake exceeded its timeout. The setting is not in this repository (it is Neon-side state),
-so it is recorded here:
+The obvious tuning knob here is autosuspend — drop it from Neon's 300-second default to 60 and
+an idle database becomes genuinely idle. That is not available to us. This project is on
+`free_v3`, and the API answers a PATCH of `suspend_timeout_seconds` with:
 
-```bash
-# read the current value — 0 means "Neon's default", not "no timeout"
-neon api /projects/restless-hill-68287324/endpoints
-
-# set it
-neon api /projects/restless-hill-68287324/endpoints/ep-royal-darkness-avzsac6o   -X PATCH -F endpoint.suspend_timeout_seconds=60
+```
+ERROR: modifying the suspend interval is not permitted on this account
 ```
 
-Two things to know before running that. `neonctl` prompts for an organization when a command
-is ambiguous, which hangs a non-interactive shell — pass `--org-id org-cool-band-89738049`. And
-under Git Bash, MSYS rewrites a leading `/projects/...` into a Windows path before `neon` ever
-sees it; export `MSYS_NO_PATHCONV=1` or the call fails with a nonsense
-`Invalid path "C:/Program Files/Git/projects/..."`.
+So 300 seconds is a fixed input, not a setting, and the only lever left is *how often something
+wakes the endpoint*. That makes the arithmetic worth knowing rather than rediscovering:
+
+- The endpoint runs at 0.25 CU. Awake continuously, that is 0.25 × 730 h ≈ **182 CU-hours per
+  month** against an allowance of 100.
+- A single request to a suspended endpoint keeps it awake for at least the full 300 seconds
+  afterwards — about **0.021 CU-hours per isolated wake**. The allowance is therefore roughly
+  **4,800 isolated wakes per month**, ~160/day. Bursty traffic is much cheaper per request,
+  because requests inside one 5-minute window share a single wake.
+- Which is why scheduled health checks are the hazard, not user traffic. Polling `/health`
+  every 15 minutes wakes the endpoint 4× an hour, each for 5 minutes — 33% duty, about **60
+  CU-hours a month**. Every 10 minutes is 50% duty, about **91 CU-hours**: the entire free tier
+  spent proving the service is up. Monitor `GET /` instead; it touches no database and wakes
+  nothing.
+
+A `suspend_timeout_seconds` of `0` in the API response means **"Neon's default"**, not "never
+suspend" — it reads as the opposite of what it means. To check the live values (read-only):
+
+```bash
+neon api /projects/restless-hill-68287324/endpoints
+```
+
+Two traps when running that. `neonctl` prompts for an organization when a command is ambiguous,
+which hangs a non-interactive shell — pass `--org-id org-cool-band-89738049`. And under Git
+Bash, MSYS rewrites a leading `/projects/...` into a Windows path before `neon` ever sees it,
+failing with a nonsense `Invalid path "C:/Program Files/Git/projects/..."`; export
+`MSYS_NO_PATHCONV=1`.
+
+If autosuspend ever does need to be 60 seconds, that is a paid-plan change, not a config change
+— price it as such rather than assuming it is a free knob that someone forgot to turn.
 
 **4. `--set-env-vars` and `--set-secrets` are full replacements, not merges.** gcloud removes
 everything already set before applying what you passed. Both lists must therefore always be
