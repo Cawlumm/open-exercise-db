@@ -25,6 +25,7 @@ The live resources:
 | Deploy identity | `gh-deploy@open-exercise-db.iam.gserviceaccount.com` |
 | Runtime identity | `oedb-run@open-exercise-db.iam.gserviceaccount.com` |
 | Neon project | `restless-hill-68287324` — Postgres 17, `aws-us-east-1`, database `openexercisedb` |
+| Neon endpoint | `ep-royal-darkness-avzsac6o` — read-write, **pooler disabled** (see rule 1), 0.25 CU, autosuspend 60s (rule 3b) |
 | R2 bucket | `oedb-media-dev` |
 
 Connection endpoints and account identifiers are deliberately not written down here — this
@@ -42,7 +43,7 @@ cross-region egress.
 
 ## Read this before you change anything
 
-Four rules, each of which has a specific failure it prevents.
+Five rules, each of which has a specific failure it prevents.
 
 **1. Use Neon's DIRECT endpoint, never the `-pooler` one.** `database.Migrate`
 (`backend/internal/database/database.go`) takes a *session-level* `pg_advisory_lock` on a
@@ -73,6 +74,32 @@ interval.** Both burn the same budget from different directions:
   continuously costs roughly 182 CU-hours/month and exhausts it in about a week — *quietly*,
   because the API keeps working right up until it doesn't. Monitor `GET /` (which touches no
   database) or poll `/health` at 10–15 minute intervals.
+
+**3b. Autosuspend is 60 seconds, and that number is a budget decision.** Neon's default is
+300 seconds, which sounds harmless and is not: it is five minutes of billed compute after every
+burst of traffic, on a free tier of 100 CU-hours per month. At 0.25 CU a single visitor per
+five minutes would keep the endpoint awake continuously — roughly 182 CU-hours/month, i.e. the
+allowance gone in about a week. Sixty seconds means an idle database is genuinely idle.
+
+The cost is paid on the *next* request: a suspended endpoint has to wake, so the first call
+after a quiet period runs 1–4 seconds instead of milliseconds. That is why the rule above says
+no liveness probe — a probe would both keep the endpoint awake *and* restart the container when
+the wake exceeded its timeout. The setting is not in this repository (it is Neon-side state),
+so it is recorded here:
+
+```bash
+# read the current value — 0 means "Neon's default", not "no timeout"
+neon api /projects/restless-hill-68287324/endpoints
+
+# set it
+neon api /projects/restless-hill-68287324/endpoints/ep-royal-darkness-avzsac6o   -X PATCH -F endpoint.suspend_timeout_seconds=60
+```
+
+Two things to know before running that. `neonctl` prompts for an organization when a command
+is ambiguous, which hangs a non-interactive shell — pass `--org-id org-cool-band-89738049`. And
+under Git Bash, MSYS rewrites a leading `/projects/...` into a Windows path before `neon` ever
+sees it; export `MSYS_NO_PATHCONV=1` or the call fails with a nonsense
+`Invalid path "C:/Program Files/Git/projects/..."`.
 
 **4. `--set-env-vars` and `--set-secrets` are full replacements, not merges.** gcloud removes
 everything already set before applying what you passed. Both lists must therefore always be
