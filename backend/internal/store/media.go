@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -171,21 +172,30 @@ func (s *MediaStore) variantsForImages(ctx context.Context, imageIDs []string) (
 // full-resolution image would see a working request while downloading many
 // times the bytes it budgeted for, on exactly the mobile connections
 // thumbnails exist to protect.
-func (s *MediaStore) GetImageVariant(ctx context.Context, imageID, name string) (model.ImageVariant, error) {
+func (s *MediaStore) GetImageVariant(ctx context.Context, imageID, name string) (model.ImageVariant, string, error) {
+	// Joined to the parent rather than fetched separately, so the caller can
+	// apply the same visibility rule the plain-image route applies without a
+	// second round trip. A variant is only ever as public as the image it
+	// belongs to: leaving the status behind here would mean an unapproved
+	// upload stayed unreachable at /images/{id} and served happily at
+	// /images/{id}/full, which is the kind of gap nobody finds until it
+	// matters.
 	query := fmt.Sprintf(`
-		SELECT %s FROM exercise_image_variants
-		WHERE image_id = $1 AND name = $2`, variantColumns)
+		SELECT %s, i.status FROM exercise_image_variants v
+		JOIN exercise_images i ON i.id = v.image_id
+		WHERE v.image_id = $1 AND v.name = $2`,
+		"v."+strings.ReplaceAll(variantColumns, ", ", ", v."))
 
 	var v model.ImageVariant
-	var scannedImageID string
+	var scannedImageID, imageStatus string
 	err := s.pool.QueryRow(ctx, query, imageID, name).Scan(
 		&v.ID, &scannedImageID, &v.Name, &v.StorageKey, &v.ContentType,
-		&v.Width, &v.Height, &v.CreatedAt,
+		&v.Width, &v.Height, &v.CreatedAt, &imageStatus,
 	)
 	if err != nil {
-		return model.ImageVariant{}, err
+		return model.ImageVariant{}, "", err
 	}
-	return v, nil
+	return v, imageStatus, nil
 }
 
 // UpsertImageVariant records (or re-points) one rendition of an image.

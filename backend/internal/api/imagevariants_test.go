@@ -268,7 +268,7 @@ func TestUpsertImageVariant_ReEncodeReplacesRatherThanDuplicates(t *testing.T) {
 	seedVariant(t, ctx, s, mediaStore, imageID, "thumb", "exercises/Reencode_Test/0/thumb.jpg", []byte("v1"), 200, 150)
 	seedVariant(t, ctx, s, mediaStore, imageID, "thumb", "exercises/Reencode_Test/0/thumb.jpg", []byte("v2"), 240, 180)
 
-	variant, err := s.Media.GetImageVariant(ctx, imageID, "thumb")
+	variant, _, err := s.Media.GetImageVariant(ctx, imageID, "thumb")
 	if err != nil {
 		t.Fatalf("GetImageVariant: %v", err)
 	}
