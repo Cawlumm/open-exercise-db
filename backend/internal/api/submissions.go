@@ -50,6 +50,11 @@ type CreateSubmissionInput struct {
 		// app. Not required, because an app that genuinely has no per-user
 		// concept should not be forced to invent one.
 		AppUserRef *string `json:"app_user_ref,omitempty" minLength:"1" maxLength:"128" doc:"Your own opaque handle for the contributor; never stored as an identity here"`
+
+		// Ids from POST /images. Validated against this app's own uploads —
+		// see checkImageOwnership for why attaching someone else's is not
+		// merely disallowed but actively dangerous.
+		ImageUploadIDs []string `json:"image_upload_ids,omitempty" maxItems:"8" doc:"Ids returned by POST /api/v1/images"`
 	}
 }
 
@@ -137,6 +142,10 @@ func registerSubmissionRoutes(hapi huma.API, s *store.Store) {
 			}
 		}
 
+		if err := checkImageOwnership(ctx, s, app, in.Body.ImageUploadIDs); err != nil {
+			return nil, err
+		}
+
 		usage, err := s.Apps.UsageFor(ctx, app.ID, derefOr(in.Body.AppUserRef, ""), capWindow)
 		if err != nil {
 			return nil, mapStoreError(err, "")
@@ -152,6 +161,7 @@ func registerSubmissionRoutes(hapi huma.API, s *store.Store) {
 			Payload:          in.Body.Payload,
 			AppID:            app.ID,
 			AppUserRef:       in.Body.AppUserRef,
+			ImageUploadIDs:   in.Body.ImageUploadIDs,
 		})
 		if err != nil {
 			return nil, mapStoreError(err, "")
@@ -283,6 +293,35 @@ func toContractSubmission(s model.Submission) contract.Submission {
 		CreatedAt:        s.CreatedAt,
 		UpdatedAt:        s.UpdatedAt,
 	}
+}
+
+// checkImageOwnership refuses image ids this app did not upload.
+//
+// Not merely an authorization nicety. Approving a submission publishes every
+// image it references, so attaching another app's pending upload would let one
+// app get a stranger's unreviewed content published under a submission a
+// moderator was looking at for other reasons — the image is the part nobody
+// re-reads once the text looks fine.
+//
+// Ownership is the storage-key prefix POST /api/v1/images writes, which is the
+// only link between an upload and its uploader today: exercise_images.
+// uploaded_by references users, and an app is not a user.
+func checkImageOwnership(ctx context.Context, s *store.Store, app model.App, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	owned, err := s.Media.CountImagesOwnedByApp(ctx, app.ID, ids)
+	if err != nil {
+		return mapStoreError(err, "")
+	}
+	if owned != len(ids) {
+		// One message for "does not exist" and "belongs to someone else": the
+		// difference would tell a caller which ids are real, which is an
+		// enumeration oracle over other apps' pending uploads.
+		return huma.Error422UnprocessableEntity(
+			"image_upload_ids must all be images you uploaded and have not yet had published")
+	}
+	return nil
 }
 
 func derefOr(p *string, fallback string) string {

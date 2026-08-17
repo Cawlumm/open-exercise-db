@@ -48,6 +48,7 @@ type CreateAppSubmissionInput struct {
 	Payload          json.RawMessage
 	AppID            string
 	AppUserRef       *string
+	ImageUploadIDs   []string
 }
 
 // CreateAppSubmission enqueues a submission attributed to an app.
@@ -59,13 +60,17 @@ type CreateAppSubmissionInput struct {
 // a runtime check inside this package rather than something the caller cannot
 // express wrongly.
 func (s *SubmissionStore) CreateAppSubmission(ctx context.Context, in CreateAppSubmissionInput) (model.Submission, error) {
+	// $7::uuid[] is load-bearing. Without it Postgres infers the COALESCE from
+	// the untyped '{}' literal, decides the whole expression is text, and
+	// rejects the insert against a uuid[] column — at runtime, on the one path
+	// that carries images.
 	query := fmt.Sprintf(`
-		INSERT INTO submissions (type, target_exercise_id, locale, payload, submitted_by_app, app_user_ref)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO submissions (type, target_exercise_id, locale, payload, submitted_by_app, app_user_ref, image_upload_ids)
+		VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::uuid[], '{}'))
 		RETURNING %s`, submissionColumns)
 
 	sub, err := scanSubmission(s.pool.QueryRow(ctx, query,
-		in.Type, in.TargetExerciseID, in.Locale, []byte(in.Payload), in.AppID, in.AppUserRef,
+		in.Type, in.TargetExerciseID, in.Locale, []byte(in.Payload), in.AppID, in.AppUserRef, in.ImageUploadIDs,
 	))
 	if err != nil {
 		return model.Submission{}, fmt.Errorf("create submission for app %s: %w", in.AppID, err)
