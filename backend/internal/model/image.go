@@ -49,6 +49,15 @@ type ImageVariant struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// Image moderation statuses, matching the CHECK in migration 0001. Only an
+// approved image is served publicly — see api.requireVisibleImage for why a
+// pending one must not be, and why the refusal is a 404 rather than a 403.
+const (
+	ImageStatusPending  = "pending"
+	ImageStatusApproved = "approved"
+	ImageStatusRejected = "rejected"
+)
+
 // VariantFull is the name every image has a rendition under. Named rather
 // than spelled inline at each call site because it is the one variant the
 // contract guarantees: contract.Image.URL, Width, and Height all describe

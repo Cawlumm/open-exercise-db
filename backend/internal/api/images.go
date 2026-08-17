@@ -11,6 +11,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/conditional"
 
 	"github.com/Cawlumm/open-exercise-db/internal/media"
+	"github.com/Cawlumm/open-exercise-db/internal/model"
 	"github.com/Cawlumm/open-exercise-db/internal/ratelimit"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
 )
@@ -134,10 +135,40 @@ func registerImageRoutes(hapi huma.API, s *store.Store, mediaStore media.Store) 
 // cmd/import-freeexercisedb wrote them through. Exported, like every other
 // handler in this package, so tests can call it directly with an input
 // struct (docs/CONVENTIONS.md section 3/6).
+// requireVisibleImage refuses to serve an image that has not been approved.
+//
+// This is the difference between hosting a moderated dataset and hosting
+// whatever anyone uploads. Once POST /images exists, an unapproved row is
+// arbitrary bytes a stranger sent: without this gate they are fetchable from
+// this domain the instant they land, and the first anyone knows is when
+// somebody else finds them. The moderation queue cannot be the control if the
+// content is already public while it sits in it.
+//
+// A moderator sees pending images, because judging one requires looking at it.
+// Same endpoint rather than a separate admin route: two routes reading the
+// same bytes is two places to get the check wrong, and the second one is
+// always the one that gets forgotten.
+//
+// 404 rather than 403 for everyone else. A 403 would confirm the id exists,
+// turning this endpoint into an oracle for enumerating unapproved uploads —
+// which is exactly the set of content that must not be discoverable.
+func requireVisibleImage(ctx context.Context, img model.Image) error {
+	if img.Status == model.ImageStatusApproved {
+		return nil
+	}
+	if user, ok := UserFromContext(ctx); ok && user.CanModerate() {
+		return nil
+	}
+	return huma.Error404NotFound("image not found")
+}
+
 func GetImage(ctx context.Context, s *store.Store, mediaStore media.Store, input *GetImageInput) (*GetImageOutput, error) {
 	img, err := s.Media.GetImageByID(ctx, input.ID)
 	if err != nil {
 		return nil, mapStoreError(err, "image not found")
+	}
+	if err := requireVisibleImage(ctx, img); err != nil {
+		return nil, err
 	}
 
 	rc, err := mediaStore.Get(ctx, img.StorageKey)
@@ -208,9 +239,13 @@ type GetImageVariantInput struct {
 // budgeted for — on exactly the mobile connections thumbnails exist to
 // protect, and with nothing in the response to reveal the substitution.
 func GetImageVariant(ctx context.Context, s *store.Store, mediaStore media.Store, input *GetImageVariantInput) (*GetImageOutput, error) {
-	variant, err := s.Media.GetImageVariant(ctx, input.ID, input.Variant)
+	variant, imageStatus, err := s.Media.GetImageVariant(ctx, input.ID, input.Variant)
 	if err != nil {
 		return nil, mapStoreError(err, "image variant not found")
+	}
+	// A variant is exactly as public as the image it belongs to.
+	if err := requireVisibleImage(ctx, model.Image{ID: input.ID, Status: imageStatus}); err != nil {
+		return nil, err
 	}
 
 	rc, err := mediaStore.Get(ctx, variant.StorageKey)
