@@ -2,7 +2,7 @@
 
 How `open-exercise-db` runs in production, and why each choice is the one it is.
 
-Production is **Cloud Run** (the API) + **Neon** (Postgres) + **Cloudflare R2** (images),
+Production is **Cloud Run** (the API) + **Supabase** (Postgres) + **Cloudflare R2** (images),
 per `docs/DESIGN.md`'s Hosting section. Every merge to `main` deploys automatically via
 `.github/workflows/deploy.yml`.
 
@@ -10,7 +10,7 @@ per `docs/DESIGN.md`'s Hosting section. Every merge to `main` deploys automatica
 GitHub (merge to main) → CI → deploy.yml → Artifact Registry (us-east4)
                                               ↓
                                    Cloud Run  oedb-api  (us-east4)
-                                     ├── Neon Postgres   (aws-us-east-1)
+                                     ├── Supabase Postgres (us-east-1, session pooler)
                                      └── Cloudflare R2   (bucket oedb-media-dev)
 ```
 
@@ -24,7 +24,9 @@ The live resources:
 | Cloud Run service | `oedb-api` |
 | Deploy identity | `gh-deploy@open-exercise-db.iam.gserviceaccount.com` |
 | Runtime identity | `oedb-run@open-exercise-db.iam.gserviceaccount.com` |
-| Neon project | `restless-hill-68287324` — Postgres 17, `aws-us-east-1`, database `openexercisedb` |
+| Supabase project | `ecwcgrogsewpjdzqgusn` — PostgreSQL 17.6, `us-east-1`, database `postgres` |
+| Supabase org | `efjtvmtccbbxwfnjkyji` |
+| Keepalive | Cloud Scheduler job `oedb-supabase-keepalive` (`us-east4`) — see rule 3b |
 | R2 bucket | `oedb-media-dev` |
 
 Connection endpoints and account identifiers are deliberately not written down here — this
@@ -33,7 +35,7 @@ repository's Actions variables (`R2_ACCOUNT_ID`, `R2_BUCKET`).
 
 Region pairing is deliberate. Every API request makes at least one database round trip and
 none of that is cacheable, so origin↔database latency is the dominant term. `us-east4`
-(Ashburn) and Neon's `aws-us-east-1` (N. Virginia) are ~1–2 ms apart; `us-central1` paired
+(Ashburn) and Supabase's `us-east-1` (N. Virginia) are ~1–2 ms apart; `us-central1` paired
 with `aws-us-east-2` would be ~15 ms *per query*, which the export path pays many times over.
 Artifact Registry lives in the same region so an image pull is neither slow nor billed as
 cross-region egress.
@@ -42,16 +44,34 @@ cross-region egress.
 
 ## Read this before you change anything
 
-Four rules, each of which has a specific failure it prevents.
+Five rules, each of which has a specific failure it prevents.
 
-**1. Use Neon's DIRECT endpoint, never the `-pooler` one.** `database.Migrate`
-(`backend/internal/database/database.go`) takes a *session-level* `pg_advisory_lock` on a
-dedicated pooled connection and releases it on that same connection. Neon's pooled endpoint
-is PgBouncer in transaction pooling mode, where a bare `SELECT pg_advisory_lock(...)` outside
-a transaction lands on an arbitrary server connection and the matching unlock can land on a
-different one. That silently defeats the exact concurrent-startup race the lock exists to
-close, and leaks a held lock until PgBouncer recycles the connection. Use
-`ep-xxxx.us-east-1.aws.neon.tech`, not `ep-xxxx-pooler...`.
+**1. Use Supabase's SESSION pooler (port 5432), never the transaction pooler (6543) and
+never the direct endpoint.** All three are offered on the connection page and only one works
+here.
+
+`database.Migrate` (`backend/internal/database/database.go`) takes a *session-level*
+`pg_advisory_lock` on a dedicated pooled connection and releases it on that same connection.
+A transaction-mode pooler — Supabase's port 6543, as PgBouncer/Supavisor in transaction mode —
+lets the lock and the unlock land on different server connections. That silently defeats the
+concurrent-startup race the lock exists to close and leaks a held lock. It also breaks the
+prepared statements pgx uses by default.
+
+The direct endpoint (`db.<ref>.supabase.co:5432`) does not have that problem, but it is
+**IPv6-only**, and Cloud Run egress is IPv4 — so it is unreachable from production regardless.
+
+That leaves the session pooler: `aws-0-us-east-1.pooler.supabase.com:5432`, user
+`postgres.<project-ref>`. Session mode holds one server connection for the life of the client
+session, so advisory locks and prepared statements both behave. Verify after any change to the
+DSN, because the failure is silent until two instances start at once:
+
+```bash
+psql "$DATABASE_URL" -c "SELECT pg_advisory_lock(1); SELECT count(*) FROM pg_locks WHERE locktype='advisory'; SELECT pg_advisory_unlock(1);"
+# count must be 1. A transaction pooler returns 0.
+```
+
+The hostname prefix is per-project and not guessable — `aws-1-us-east-1...` does not resolve
+for this project. Read it off the dashboard rather than assuming.
 
 **2. Every migration must be backward-compatible with the previous revision.** Migrations run
 in-process on every boot (`cmd/api-server/main.go`), not as a separate release step. So the
@@ -61,18 +81,74 @@ then contract: add nullable columns and new tables freely; never drop or rename 
 the same release that stops using it. This is the single most important operational rule here,
 and it is a direct consequence of in-process migration plus traffic-based rollback.
 
-**3. Do not add a liveness probe, and do not point a monitor at `/health` on a short
-interval.** Both burn the same budget from different directions:
+**3. Do not add a liveness probe.** `/health` pings the database with a 2-second timeout and
+returns 503 on failure. Cloud Run's response to a failed liveness probe is to *restart the
+container*, which turns a three-second database blip into a restart and a flapping database
+into a restart storm. `/health` is also not rate-limited and consumes a pool connection per
+call, so keep it off short-interval monitoring too. Monitor `GET /`, which touches no database.
 
-- `/health` pings the database with a 2-second timeout and returns 503 on failure. Neon
-  autosuspends when idle and a cold wake can exceed 2 seconds. Cloud Run's response to a
-  failed liveness probe is to *restart the container* — turning a three-second database blip
-  into a restart, and a flapping database into a restart storm. `/health` is also not
-  rate-limited and consumes a pool connection per call.
-- Neon's free tier allows 100 CU-hours per month. Anything that keeps the database awake
-  continuously costs roughly 182 CU-hours/month and exhausts it in about a week — *quietly*,
-  because the API keeps working right up until it doesn't. Monitor `GET /` (which touches no
-  database) or poll `/health` at 10–15 minute intervals.
+**3b. The database pauses after 7 days of inactivity, and a Cloud Scheduler job is what stops
+it.** Supabase suspends a free project after a week with no activity, and it does not wake on
+its own — restoring it is a manual click in the dashboard. For a public API that is idle for
+long stretches by design, that means the service stays down until somebody notices.
+
+`oedb-supabase-keepalive` (Cloud Scheduler, `us-east4`, `0 12 */2 * *`) prevents it by calling
+`GET /api/v1/exercises?per_page=1` every two days.
+
+Two things about that job are load-bearing:
+
+- **It must hit an endpoint that queries Postgres.** `GET /` would keep Cloud Run warm and do
+  nothing at all for the database, which is the thing that pauses. Verify a change by watching
+  the counter move rather than by trusting the HTTP status:
+  ```bash
+  psql "$DATABASE_URL" -t -c "SELECT tup_returned FROM pg_stat_database WHERE datname=current_database()"
+  ```
+- **It does not live in GitHub Actions.** A scheduled workflow is disabled automatically after
+  60 days of repository inactivity once the repo is public — so the keepalive would switch
+  itself off during exactly the quiet stretch it exists to cover. Cloud Scheduler has no such
+  coupling to how often anyone commits.
+
+Unlike the metered compute this project previously ran on, keeping this database awake costs
+nothing: a free Supabase project is always-on until it pauses. The keepalive is protecting
+against the pause, not managing a budget.
+
+**3c. Never let `anon` or `authenticated` hold grants in `public`.** Supabase ships a
+PostgREST API in front of every project and, by default, grants `anon` and `authenticated`
+full DML — `SELECT, INSERT, UPDATE, DELETE, TRUNCATE` — on every table in `public`, with RLS
+disabled. The anon key is *public by design*; it ships inside client apps. Left as-is, anyone
+holding it could read `apps` credential hashes, read submissions that have not been through
+moderation, or `TRUNCATE` the published catalog.
+
+This API never uses PostgREST — it connects to Postgres directly as `postgres`. So the correct
+state is no grants at all:
+
+```sql
+REVOKE ALL PRIVILEGES ON ALL TABLES    IN SCHEMA public FROM anon, authenticated;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM anon, authenticated;
+REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM anon, authenticated;
+REVOKE USAGE ON SCHEMA public FROM anon, authenticated;
+
+-- Migrations CREATE TABLE as `postgres` on every boot. Without this, the next new
+-- table is granted to anon again and the hole reopens on a deploy nobody connects
+-- to permissions.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES    FROM anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON FUNCTIONS FROM anon, authenticated;
+```
+
+RLS is enabled on every table as a second, independent control: `postgres` has `rolbypassrls`
+so the API is unaffected, while `anon` does not, so a grant restored by hand or by a
+Supabase-side default still denies. Audit with:
+
+```sql
+SELECT count(*) FROM information_schema.role_table_grants
+ WHERE table_schema='public' AND grantee IN ('anon','authenticated');   -- must be 0
+SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+ WHERE n.nspname='public' AND c.relkind='r' AND NOT c.relrowsecurity;   -- must be 0
+```
+
+Re-run that audit after adding a migration. It is the one check that a normal deploy will not
+perform for you.
 
 **4. `--set-env-vars` and `--set-secrets` are full replacements, not merges.** gcloud removes
 everything already set before applying what you passed. Both lists must therefore always be
@@ -297,7 +373,7 @@ done
 Adding versions — **use `printf`, never `echo`**:
 
 ```bash
-printf '%s' 'postgres://USER:PASS@ep-xxxx.us-east-1.aws.neon.tech/openexercisedb?sslmode=require' \
+printf '%s' 'postgres://postgres.<ref>:PASS@aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require' \
   | gcloud secrets versions add oedb-database-url --data-file=-
 printf '%s' '<r2 access key id>'     | gcloud secrets versions add oedb-r2-access-key-id --data-file=-
 printf '%s' '<r2 secret access key>' | gcloud secrets versions add oedb-r2-secret-access-key --data-file=-
@@ -346,16 +422,16 @@ migration lands.
 
 The importer is not in the container image — `backend/Dockerfile` builds only
 `./cmd/api-server`, because the importer is a one-off bootstrap tool per
-`docs/CONVENTIONS.md`'s `cmd/` layout. Run it from a workstation against the Neon DSN. This is
-one of the concrete reasons production uses Neon rather than Cloud SQL: Neon is a public
-TCP+TLS host, so this needs no proxy sidecar.
+`docs/CONVENTIONS.md`'s `cmd/` layout. Run it from a workstation against the production DSN.
+This is one of the concrete reasons production uses a managed public Postgres rather than
+Cloud SQL: Supabase's pooler is a public TCP+TLS host, so this needs no proxy sidecar.
 
 ```bash
 cd backend
 
 # -limit 5 first: a real (not dry-run) write proves the R2 credentials before
 # committing to a 40-minute run.
-DATABASE_URL='postgres://...neon.tech/openexercisedb?sslmode=require' \
+DATABASE_URL='postgres://postgres.<ref>:...@aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require' \
 R2_ACCOUNT_ID='...' R2_ACCESS_KEY_ID='...' R2_SECRET_ACCESS_KEY='...' R2_BUCKET='oedb-media-dev' \
 go run ./cmd/import-freeexercisedb -limit 5
 
@@ -385,7 +461,7 @@ explicitly.
 
 Do the initial create manually. It is the only place `--allow-unauthenticated` is needed —
 which requires `run.services.setIamPolicy`, a permission deliberately withheld from the deploy
-account — and it means finding out whether Neon and R2 are wired correctly in a terminal
+account — and it means finding out whether Postgres and R2 are wired correctly in a terminal
 rather than through a workflow log.
 
 Run the push from a shell that has `gcloud` on its `PATH`. `configure-docker` installs a
@@ -425,8 +501,9 @@ revisions, so CI never re-sets it — which is why it does not appear in `deploy
 **`--max-instances=4`** is the database connection ceiling expressed as a Cloud Run flag.
 `database.Connect` clamps `MaxConns` into `[5,10]`, forcing 10 for anything outside that range
 — so `pool_max_conns=3` in the DSN is *clamped back up to 10* and per-instance connections
-cannot be lowered from configuration at all. Four instances is 40 connections, against Neon
-free's ~112, leaving room for a local importer run (another 10) and a psql session. It also
+cannot be lowered from configuration at all. Four instances is 40 connections, well inside
+what Supabase's session pooler allows on the free plan, leaving room for a local importer run
+(another 10) and a psql session. It also
 caps runaway cost from a scraper. Four instances at 80 concurrency is 320 concurrent requests,
 far beyond anything this API will see.
 
@@ -545,8 +622,8 @@ rate-limit tier (5 rpm, burst 2), so an unadorned `curl` loop will start returni
 look like a broken deployment.
 
 1. **Liveness and database** — `g "$URL/health"` returns `{"status":"ok"}`. A 503 with
-   `"reason":"database"` may be nothing more than a Neon cold wake exceeding the 2-second ping
-   timeout; retry once.
+   `"reason":"database"` most likely means the project has paused — check rule 3b and the
+   keepalive job before assuming a code fault.
 2. **The data is really there** — `g "$URL/api/v1/exercises?per_page=1" | jq .total` → **873**.
 3. **Taxonomy** — `/api/v1/meta/{muscle-groups,equipment,categories,locales}` all non-empty.
 4. **Images resolve** — take `.exercises[0].images[0].url` (relative until `IMAGE_BASE_URL` is
@@ -564,12 +641,15 @@ look like a broken deployment.
    `RateLimit-Remaining` decrementing across them. If it never decrements, `clientKey` is
    bucketing every request separately.
 9. **Cold start** — wait 20 minutes, then `time g "$URL/health"`. This is the worst case:
-   Cloud Run cold start plus Neon wake. Expect 1–4 seconds.
+   Cloud Run cold start only — the database is always-on, so it no longer contributes a wake.
+   Expect well under a second of database time.
 10. **Logs** — `gcloud run services logs read "$SERVICE" --region="$REGION" --limit=50`. Expect
     `media store: r2 bucket "oedb-media-dev"` and the `IMAGE_BASE_URL is unset` warning, which is
     correct and expected until a CDN domain exists.
-11. **A week later** — Artifact Registry storage, Cloud Run usage, and Neon's compute-hours
-    dashboard. The Neon number is the one most likely to surprise you.
+11. **A week later** — Artifact Registry storage, Cloud Run usage, and Supabase's 500 MB
+    database and 5 GB egress limits. Also confirm `oedb-supabase-keepalive` has actually run:
+    a keepalive that quietly stopped looks exactly like one that is working, right up until
+    the project pauses.
 
 ---
 

@@ -103,7 +103,7 @@ func main() {
 	mux := http.NewServeMux()
 	// Health pings the database rather than answering ok unconditionally.
 	// This is what a load balancer routes on, and every useful endpoint here
-	// needs Postgres: an instance that cannot reach Neon has nothing to
+	// needs Postgres: an instance that cannot reach the database has nothing to
 	// serve, so a health check that ignores the database reports ready for
 	// an instance that will 500 every request it receives. The ping is
 	// bounded well inside any sane probe interval — a health check that
