@@ -23,7 +23,7 @@ to serve; the full-catalog export costs the most.
 | Read | `GET /exercises/{id}`, `GET /meta/*`, `GET /images/{id}` | 60 req/min/IP | Cheap, cached, single-row/short-list reads — an id-keyed image fetch is one more instance of the same shape, and its response carries a long `immutable` `Cache-Control` on top |
 | Search | `GET /exercises` | 60 req/min/IP (burst up to 20) | Matched to Read rather than set below it — live lookup is the primary integration model, so search is *its* main endpoint. Still assumes a *debounced* client, not a per-keystroke one — see [Debounce your search](#debounce-your-search-not-optional) |
 | Export | `GET /exercises/export`, `POST /images` | 5 req/min/IP | The two heaviest requests in the API. The export is the largest response; an upload is the largest *cost* — it buffers megabytes, decodes them, re-encodes them and writes to object storage, which no cache can absorb. See [Mirror the dump, don't poll it](#mirror-the-dump-dont-poll-it). Uploading a batch is meant to be paced: back off on `429` rather than retrying immediately, and note that the per-app pending-upload quota, not this limit, is what actually bounds how much you can have in review at once |
-| Unidentified | Any request without a conformant `User-Agent` | 5 req/min/IP, replacing whatever tier the endpoint would otherwise use | See [User-Agent requirement](#user-agent-requirement) |
+| Unidentified | Any request that identifies itself with neither a conformant `User-Agent` nor `X-OEDB-Client` | 5 req/min/IP, replacing whatever tier the endpoint would otherwise use | See [User-Agent requirement](#user-agent-requirement) |
 
 These numbers are enforced in two places, and it matters which one you're actually being
 limited by:
@@ -66,6 +66,32 @@ doesn't count: no header at all, or a default header from an HTTP library or bro
 (`curl/8.x`, `python-requests/...`, `Go-http-client/1.1`, `PostmanRuntime/...`, a bare
 `Mozilla/5.0 (...)` browser string, etc.) — those identify the tool making the request, not
 who's actually operating it.
+
+### Calling from a browser: use `X-OEDB-Client`
+
+Script running in a page **cannot** set `User-Agent` — the Fetch spec lists it as a forbidden
+header name, so the browser sends its own `Mozilla/5.0 (...)` string no matter what your code
+asks for. That string is a generic one, which means a web app following the rule above would
+still land in the Unidentified tier with nothing it could do about it. The requirement said
+"identify yourself" and the platform said "you may not".
+
+So browser clients send the same identity in a header they are allowed to set:
+
+```
+X-OEDB-Client: AppName/Version (ContactEmail)
+```
+
+Same format, same rules, same effect on your budget. Send it *instead of* worrying about
+`User-Agent`; you will be sending both, because the browser adds its own, and
+`X-OEDB-Client` wins when both are present. No CORS configuration is needed on your side — the
+preflight response echoes whatever request headers you ask for.
+
+This is not a way around the requirement. A malformed `X-OEDB-Client` (`Mozilla/5.0`, an app
+name with no contact, an empty value) fails exactly as the same string would fail as a
+`User-Agent`, and you stay on the reduced budget.
+
+Non-browser clients should keep using `User-Agent`. It is the convention every other HTTP tool
+already understands, and there is no reason to send a second header when the first one works.
 
 **A request without a conformant `User-Agent` is not rejected outright.** It's routed to a
 single, sharply reduced budget (5 req/min/IP) instead of the endpoint's normal tier. This is a
