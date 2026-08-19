@@ -97,6 +97,16 @@ type Config struct {
 // defaults exist so the origin still behaves sanely as defense-in-depth,
 // not because they're the numbers the public policy promises.
 type RateLimitConfig struct {
+	// FloodRPM/FloodBurst is the coarse pre-authentication ceiling per client
+	// address. Not policy — see ratelimit.TierFlood.
+	FloodRPM   float64
+	FloodBurst int
+
+	// AppRPM/AppBurst is what a registered app gets once its credential has
+	// been verified, billed to the app rather than to its address.
+	AppRPM   float64
+	AppBurst int
+
 	ReadRPM   float64
 	ReadBurst int
 
@@ -139,15 +149,32 @@ func Load() Config {
 		// to sub-second windows via the same env vars rather than sleeping
 		// through production-sized ones.
 		RateLimit: RateLimitConfig{
-			ReadRPM:   getEnvFloat("OEDB_RATELIMIT_READ_RPM", 60),
-			ReadBurst: getEnvInt("OEDB_RATELIMIT_READ_BURST", 20),
+			FloodRPM:   getEnvFloat("OEDB_RATELIMIT_FLOOD_RPM", 1200),
+			FloodBurst: getEnvInt("OEDB_RATELIMIT_FLOOD_BURST", 1200),
+
+			// Registering an app is what earns this. It is an order of
+			// magnitude above the anonymous tiers because an app is
+			// accountable: it has a contact address, and a credential that can
+			// be suspended if it misbehaves — neither of which is true of an
+			// address.
+			AppRPM:   getEnvFloat("OEDB_RATELIMIT_APP_RPM", 600),
+			AppBurst: getEnvInt("OEDB_RATELIMIT_APP_BURST", 600),
+
+			// Burst equals RPM: a client may spend a minute's budget at once
+			// and then refill steadily. A burst set to a fraction of the rate
+			// rejects the shape real clients have — a cold start, a picker
+			// opening, a backfill — while nowhere near the advertised
+			// per-minute figure, which is the single most confusing way for a
+			// limit to behave.
+			ReadRPM:   getEnvFloat("OEDB_RATELIMIT_READ_RPM", 120),
+			ReadBurst: getEnvInt("OEDB_RATELIMIT_READ_BURST", 120),
 
 			// Matched to Read rather than set below it: docs/DESIGN.md makes
 			// live lookup the *primary* consumption model, which makes search
 			// the main endpoint for the integration path we recommend.
 			// Throttling it under plain reads would penalize exactly that.
-			SearchRPM:   getEnvFloat("OEDB_RATELIMIT_SEARCH_RPM", 60),
-			SearchBurst: getEnvInt("OEDB_RATELIMIT_SEARCH_BURST", 20),
+			SearchRPM:   getEnvFloat("OEDB_RATELIMIT_SEARCH_RPM", 120),
+			SearchBurst: getEnvInt("OEDB_RATELIMIT_SEARCH_BURST", 120),
 
 			ExportRPM:   getEnvFloat("OEDB_RATELIMIT_EXPORT_RPM", 5),
 			ExportBurst: getEnvInt("OEDB_RATELIMIT_EXPORT_BURST", 2),

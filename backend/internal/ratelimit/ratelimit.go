@@ -26,6 +26,34 @@ const (
 	TierSearch Tier = "search"
 	// TierExport covers GET /exercises/export — the full-catalog dump.
 	TierExport Tier = "export"
+	// TierApp is the budget a request gets once it has proved which
+	// registered app it belongs to.
+	//
+	// It replaces TierRead and TierSearch for an authenticated app, and
+	// deliberately does not replace TierExport: the export is the single
+	// heaviest request in the API and is meant to be mirrored on a schedule,
+	// which registering an app does not change.
+	//
+	// Registering an app is what earns it. Before this tier existed a
+	// credential bought nothing — a named, revocable consumer got the same
+	// budget as an anonymous caller with a polite User-Agent, which is
+	// backwards: accountability should be rewarded, and an app that abuses
+	// its budget can have its credential suspended, which an IP cannot.
+	TierApp Tier = "app"
+
+	// TierFlood is the coarse per-address ceiling applied before a request is
+	// authenticated.
+	//
+	// It exists for one reason: the real budget can only be decided once we
+	// know which app is calling, and finding that out costs a database lookup.
+	// Something has to bound how many of those lookups one address can force,
+	// or the credential check becomes the cheapest amplification vector in the
+	// API — the hazard the middleware order was originally written to avoid.
+	//
+	// It is not policy and should never be the limit a well-behaved client
+	// meets. It sits far above every real tier so that the tier below it is
+	// always the one that binds.
+	TierFlood Tier = "flood"
 
 	// Unidentified is not a cost tier — it's an orthogonal, always-strict
 	// bucket applied *instead of* (never in addition to) a request's real
@@ -72,6 +100,8 @@ const DefaultCleanupInterval = 2 * time.Minute
 // package doc) so it stays usable and testable without pulling in
 // env-var parsing.
 type Config struct {
+	Flood        Rule
+	App          Rule
 	Read         Rule
 	Search       Rule
 	Export       Rule
@@ -92,16 +122,38 @@ type Config struct {
 // RateLimitConfig doc comment for why these specific numbers.
 func DefaultConfig() Config {
 	return Config{
-		Read:         Rule{RPM: 60, Burst: 20},
-		Search:       Rule{RPM: 30, Burst: 15},
+		// Burst equals RPM for everything but the export. A token bucket
+		// whose burst is a fraction of its rate rejects the shape real
+		// clients actually have — a cold start, a picker opening, a backfill
+		// — while nowhere near the per-minute budget it advertises. Letting a
+		// caller spend a minute's worth at once and refill steadily is both
+		// the conventional shape and the one that stops surprising people.
+		//
+		// The export keeps a small burst because a single one of those
+		// requests costs seconds of server time, so "spend the minute at
+		// once" is exactly what it must not allow.
+		// Twice the app tier: high enough that it never binds for a legitimate
+		// caller (even several apps behind one address), low enough that a
+		// single address cannot turn credential verification into a flood of
+		// database lookups.
+		Flood:        Rule{RPM: 1200, Burst: 1200},
+		App:          Rule{RPM: 600, Burst: 600},
+		Read:         Rule{RPM: 120, Burst: 120},
+		Search:       Rule{RPM: 120, Burst: 120},
 		Export:       Rule{RPM: 5, Burst: 2},
-		Unidentified: Rule{RPM: 5, Burst: 2},
+		Unidentified: Rule{RPM: 5, Burst: 5},
 		IdleTTL:      DefaultIdleTTL,
 	}
 }
 
 func (c Config) withDefaults() Config {
 	d := DefaultConfig()
+	if !c.Flood.valid() {
+		c.Flood = d.Flood
+	}
+	if !c.App.valid() {
+		c.App = d.App
+	}
 	if !c.Read.valid() {
 		c.Read = d.Read
 	}
@@ -128,6 +180,10 @@ func (c Config) rule(tier Tier) Rule {
 		return c.Search
 	case TierExport:
 		return c.Export
+	case TierApp:
+		return c.App
+	case TierFlood:
+		return c.Flood
 	case Unidentified:
 		return c.Unidentified
 	default:

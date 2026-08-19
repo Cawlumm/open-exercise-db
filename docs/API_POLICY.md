@@ -20,8 +20,9 @@ to serve; the full-catalog export costs the most.
 
 | Tier | Applies to | Limit | Why |
 |---|---|---|---|
-| Read | `GET /exercises/{id}`, `GET /meta/*`, `GET /images/{id}` | 60 req/min/IP | Cheap, cached, single-row/short-list reads — an id-keyed image fetch is one more instance of the same shape, and its response carries a long `immutable` `Cache-Control` on top |
-| Search | `GET /exercises` | 60 req/min/IP (burst up to 20) | Matched to Read rather than set below it — live lookup is the primary integration model, so search is *its* main endpoint. Still assumes a *debounced* client, not a per-keystroke one — see [Debounce your search](#debounce-your-search-not-optional) |
+| **App** | Any read, once a valid app credential is presented | **600 req/min/app** (burst 600) | Billed to the app, not to its address — see [Register an app for a bigger budget](#register-an-app-for-a-bigger-budget) |
+| Read | `GET /exercises/{id}`, `GET /meta/*`, `GET /images/{id}` | 120 req/min/IP (burst 120) | Cheap, cached, single-row/short-list reads — an id-keyed image fetch is one more instance of the same shape, and its response carries a long `immutable` `Cache-Control` on top |
+| Search | `GET /exercises` | 120 req/min/IP (burst 120) | Matched to Read rather than set below it — live lookup is the primary integration model, so search is *its* main endpoint. Still assumes a *debounced* client, not a per-keystroke one — see [Debounce your search](#debounce-your-search-not-optional) |
 | Export | `GET /exercises/export`, `POST /images` | 5 req/min/IP | The two heaviest requests in the API. The export is the largest response; an upload is the largest *cost* — it buffers megabytes, decodes them, re-encodes them and writes to object storage, which no cache can absorb. See [Mirror the dump, don't poll it](#mirror-the-dump-dont-poll-it). Uploading a batch is meant to be paced: back off on `429` rather than retrying immediately, and note that the per-app pending-upload quota, not this limit, is what actually bounds how much you can have in review at once |
 | Unidentified | Any request that identifies itself with neither a conformant `User-Agent` nor `X-OEDB-Client` | 5 req/min/IP, replacing whatever tier the endpoint would otherwise use | See [User-Agent requirement](#user-agent-requirement) |
 
@@ -138,6 +139,37 @@ Matching is substring-based against the taxonomy slugs, which is deliberate: nob
 `?q=squats` will not find "Squat". Ranking is exact name, then name prefix, then name
 substring, then taxonomy-only.
 
+## Register an app for a bigger budget
+
+Send a registered app credential and your reads are billed to **your app at 600 req/min**
+instead of to your IP address at 120:
+
+```
+Authorization: Bearer oedb_<key_id>.<secret>
+```
+
+Two things change when you do:
+
+- **The budget is an order of magnitude larger.** An app is accountable in a way an address
+  is not — it has a contact address on file and a credential that can be suspended — so it
+  is trusted further.
+- **You stop sharing a bucket with strangers.** Anonymous limits are per-IP, so everyone
+  behind one office NAT or mobile carrier address shares a budget (see
+  [Known limitation: shared IPs](#known-limitation-shared-ips)). An app's budget is its own
+  wherever its requests come from, which makes that limitation disappear for you.
+
+The credential is verified against the database before any of this applies. Presenting a
+well-formed but invalid credential earns nothing — it is billed exactly as an anonymous
+request, so a wrong or rotated key shows up as the anonymous limit rather than as a 401 on a
+public read.
+
+**The export is deliberately excluded.** `GET /exercises/export` and `POST /images` stay on
+their own tier for an app exactly as for anyone else: they are the heaviest requests in the
+API, and registering does not make polling them reasonable. Mirror the dump on a schedule.
+
+Anonymous access is not going away and needs no key. This exists so the consumers who *are*
+accountable are not held to a limit sized for anonymous traffic.
+
 ## Debounce your search (not optional)
 
 `GET /exercises` is the endpoint a live type-ahead search hits, and it's easy to blow through
@@ -148,8 +180,8 @@ multiplies that.
 
 **Debounce 300-500ms before firing a search request**, or fetch a candidate set once per
 session/page-load and filter it client-side instead of re-querying on every keystroke. Either
-approach comfortably fits inside the Search tier's burst allowance (20 requests available
-immediately, refilling at 1/sec) for real usage patterns; a per-keystroke integration will
+approach comfortably fits inside the Search tier's burst allowance (120 requests available
+immediately, refilling at 2/sec) for real usage patterns; a per-keystroke integration will
 not.
 
 ## Mirror the dump, don't poll it

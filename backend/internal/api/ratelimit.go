@@ -184,8 +184,17 @@ func rateLimitMiddleware(hapi huma.API, limiter *ratelimit.Limiter) func(huma.Co
 			tier = fallbackTier
 		}
 
-		key := clientKey(ctx)
-		identified := isIdentifiedClient(ctx)
+		// Identity first: a request that proved which registered app it belongs
+		// to is billed to that app, not to the address it arrived from. That
+		// fixes two things at once — a credential now buys a larger budget, and
+		// consumers behind one NAT or carrier-grade address stop sharing a
+		// bucket with strangers.
+		//
+		// This runs after appAuthMiddleware, so the app here has had its secret
+		// verified against the database. Reading the key id out of the
+		// credential without verifying it would be the same mistake as trusting
+		// CF-Connecting-IP: anyone could mint a fresh bucket by claiming an id.
+		key, tier, identified := billingFor(ctx, tier)
 		decision := limiter.Allow(key, tier, identified)
 
 		ctx.SetHeader("RateLimit-Limit", strconv.Itoa(decision.Limit))
@@ -217,4 +226,67 @@ func rateLimitMessage(d ratelimit.Decision, identified bool) string {
 		"rate limit exceeded for the %s tier (%d req/min); see docs/API_POLICY.md for limits and how to request more",
 		d.EffectiveTier, d.Limit,
 	)
+}
+
+// appBucketPrefix namespaces app buckets so an app id can never collide with a
+// client address in the limiter's key space.
+const appBucketPrefix = "app:"
+
+// billingFor decides whose budget a request spends: the app that authenticated
+// it, or the address it came from.
+//
+// An authenticated app is billed to itself at TierApp, and counts as identified
+// however its User-Agent reads — it proved who it is with a credential, which is
+// a stronger claim than any header. Everything else keeps the previous
+// behaviour exactly.
+//
+// TierExport is deliberately left alone. The export is the heaviest request in
+// the API and is meant to be mirrored on a schedule; registering an app is not a
+// reason to let it be polled, so an app doing exports still spends the export
+// budget, keyed to itself.
+func billingFor(ctx huma.Context, tier ratelimit.Tier) (string, ratelimit.Tier, bool) {
+	app, ok := AppFromContext(ctx.Context())
+	if !ok {
+		return clientKey(ctx), tier, isIdentifiedClient(ctx)
+	}
+	if tier == ratelimit.TierExport {
+		return appBucketPrefix + app.ID, ratelimit.TierExport, true
+	}
+	return appBucketPrefix + app.ID, ratelimit.TierApp, true
+}
+
+// floodGuardMiddleware is the coarse per-address ceiling that runs before
+// authentication.
+//
+// The middleware order this sits in is load-bearing. The real budget depends on
+// which app is calling, and establishing that costs a database lookup, so the
+// policy limiter has to run after authentication. That would leave credential
+// verification as the cheapest amplification vector in the API — an attacker
+// looping forged credentials would buy a query per request — which is precisely
+// why authentication used to run last.
+//
+// This closes that gap by bounding, per address, how many requests can reach the
+// credential check at all. It is deliberately not policy: it sits far above every
+// real tier, so a well-behaved caller never meets it and the tier below is always
+// the one that binds. A caller that does meet it gets the same 429 contract as
+// any other, so nothing downstream has to special-case it.
+//
+// It also keeps malformed requests metered. Rejecting NUL bytes now happens
+// before the policy limiter rather than after it, so without this a client
+// looping malformed query strings would be rejected for free — the same
+// unmetered path a previous fix closed.
+func floodGuardMiddleware(hapi huma.API, limiter *ratelimit.Limiter) func(huma.Context, func(huma.Context)) {
+	return func(ctx huma.Context, next func(huma.Context)) {
+		decision := limiter.Allow(clientKey(ctx), ratelimit.TierFlood, true)
+		if !decision.Allowed {
+			ctx.SetHeader("RateLimit-Limit", strconv.Itoa(decision.Limit))
+			ctx.SetHeader("RateLimit-Remaining", strconv.Itoa(decision.Remaining))
+			ctx.SetHeader("RateLimit-Reset", strconv.Itoa(decision.ResetSeconds))
+			ctx.SetHeader("Retry-After", strconv.Itoa(decision.RetryAfterSeconds))
+			huma.WriteErr(hapi, ctx, http.StatusTooManyRequests,
+				"too many requests from this address; slow down — see docs/API_POLICY.md")
+			return
+		}
+		next(ctx)
+	}
 }
