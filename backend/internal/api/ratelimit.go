@@ -54,6 +54,37 @@ var genericUAPrefixes = []string{
 	"python-urllib/", "httpie/", "libcurl/", "restsharp/", "guzzlehttp/",
 }
 
+// clientIDHeader is the browser-usable alternative to User-Agent.
+//
+// The User-Agent policy is unenforceable for exactly the consumer this API
+// most wants: a web app calling it from the page. `User-Agent` is a forbidden
+// header name in the Fetch spec, so script cannot set it — the browser's own
+// string is sent instead, that string starts with "Mozilla/", and
+// genericUAPrefixes correctly classifies it as unidentified. The result was
+// that a browser client was capped at the Unidentified tier permanently, with
+// no action available to its author. The policy said "identify yourself" and
+// the platform said "you may not".
+//
+// So identification accepts this header as an equal alternative, in the same
+// `AppName/Version (ContactEmail)` form. Nothing about the trust model changes:
+// a User-Agent was always client-supplied and unverified, and this is the same
+// claim carried in a header the browser actually permits. It needs no CORS
+// allow-list entry because the preflight handler (cors.go) echoes whatever
+// headers the caller asks for, which its comment anticipated for precisely
+// this case.
+const clientIDHeader = "X-OEDB-Client"
+
+// isIdentifiedClient reports whether a request carries a usable identity, from
+// either identification channel. X-OEDB-Client wins when both are present: a
+// browser cannot suppress its own User-Agent, so requiring UA to be absent
+// would make the header unusable in the one place it exists to serve.
+func isIdentifiedClient(ctx huma.Context) bool {
+	if isIdentifiedUA(ctx.Header(clientIDHeader)) {
+		return true
+	}
+	return isIdentifiedUA(ctx.Header("User-Agent"))
+}
+
 // isIdentifiedUA reports whether ua satisfies docs/PHASE1_BUILD_PLAN.md
 // WO-7's User-Agent policy, as documented publicly in docs/API_POLICY.md.
 //
@@ -154,7 +185,7 @@ func rateLimitMiddleware(hapi huma.API, limiter *ratelimit.Limiter) func(huma.Co
 		}
 
 		key := clientKey(ctx)
-		identified := isIdentifiedUA(ctx.Header("User-Agent"))
+		identified := isIdentifiedClient(ctx)
 		decision := limiter.Allow(key, tier, identified)
 
 		ctx.SetHeader("RateLimit-Limit", strconv.Itoa(decision.Limit))
@@ -178,7 +209,7 @@ func rateLimitMiddleware(hapi huma.API, limiter *ratelimit.Limiter) func(huma.Co
 func rateLimitMessage(d ratelimit.Decision, identified bool) string {
 	if !identified {
 		return fmt.Sprintf(
-			"rate limit exceeded for unidentified clients (%d req/min budget); set a descriptive User-Agent in the form \"AppName/Version (ContactEmail)\" to use this endpoint's normal limit — see docs/API_POLICY.md",
+			"rate limit exceeded for unidentified clients (%d req/min budget); identify yourself in the form \"AppName/Version (ContactEmail)\" via the User-Agent header, or via X-OEDB-Client if you are calling from a browser (script cannot set User-Agent) — see docs/API_POLICY.md",
 			d.Limit,
 		)
 	}

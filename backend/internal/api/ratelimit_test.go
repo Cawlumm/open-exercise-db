@@ -239,3 +239,66 @@ func TestRateLimit_429IsDocumentedInOpenAPISpec(t *testing.T) {
 		}
 	}
 }
+
+// A browser is the one consumer that cannot comply with the User-Agent policy:
+// the Fetch spec makes User-Agent a forbidden header name, so script cannot set
+// it and the browser's own "Mozilla/..." string is sent instead — which
+// genericUAPrefixes correctly classifies as unidentified. Before X-OEDB-Client
+// existed, a web app was pinned to the Unidentified tier permanently with no
+// action available to its author, which made this API unusable from a page.
+func TestRateLimit_BrowserCanIdentifyWithoutUserAgent(t *testing.T) {
+	const browserUA = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+	const clientID = "X-OEDB-Client: lyftr-web/1.0 (contact@example.com)"
+
+	t.Run("browser UA alone is still unidentified", func(t *testing.T) {
+		testAPI := newRegisteredTestAPI(t, ratelimit.Config{
+			Read:         ratelimit.Rule{RPM: 60, Burst: 5},
+			Unidentified: ratelimit.Rule{RPM: 60, Burst: 1},
+		})
+		path := "/api/v1/meta/categories"
+
+		if first := testAPI.Get(path, browserUA); first.Code != http.StatusOK {
+			t.Fatalf("first browser request = %d, want 200", first.Code)
+		}
+		if second := testAPI.Get(path, browserUA); second.Code != http.StatusTooManyRequests {
+			t.Fatalf("second browser request = %d, want 429 — a bare browser UA must not buy the read tier", second.Code)
+		}
+	})
+
+	t.Run("X-OEDB-Client earns the endpoint's normal tier despite the browser UA", func(t *testing.T) {
+		testAPI := newRegisteredTestAPI(t, ratelimit.Config{
+			Read:         ratelimit.Rule{RPM: 60, Burst: 5},
+			Unidentified: ratelimit.Rule{RPM: 60, Burst: 1},
+		})
+		path := "/api/v1/meta/categories"
+
+		// Both headers are sent together, which is the only shape a real
+		// browser can produce: it cannot suppress its own User-Agent, so a
+		// rule requiring UA to be absent would make the header useless.
+		for i := range 4 {
+			resp := testAPI.Get(path, browserUA, clientID)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("request %d with X-OEDB-Client = %d, want 200 (read burst is 5); body: %s", i+1, resp.Code, resp.Body.String())
+			}
+		}
+	})
+
+	t.Run("a junk X-OEDB-Client does not buy the normal tier", func(t *testing.T) {
+		testAPI := newRegisteredTestAPI(t, ratelimit.Config{
+			Read:         ratelimit.Rule{RPM: 60, Burst: 5},
+			Unidentified: ratelimit.Rule{RPM: 60, Burst: 1},
+		})
+		path := "/api/v1/meta/equipment"
+
+		// The header is an identity claim in a defined format, not a magic
+		// opt-out — anything that would fail the policy as a User-Agent must
+		// fail here too, or the policy is decorative.
+		const junk = "X-OEDB-Client: Mozilla/5.0"
+		if first := testAPI.Get(path, browserUA, junk); first.Code != http.StatusOK {
+			t.Fatalf("first junk-header request = %d, want 200", first.Code)
+		}
+		if second := testAPI.Get(path, browserUA, junk); second.Code != http.StatusTooManyRequests {
+			t.Errorf("second junk-header request = %d, want 429 — malformed identification must stay unidentified", second.Code)
+		}
+	})
+}
