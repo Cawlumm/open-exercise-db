@@ -58,7 +58,7 @@ func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter 
 	// so the requests were free. It also stripped the RateLimit-* headers from
 	// that one error response, making it the only 4xx a well-behaved consumer
 	// could not read its remaining budget from.
-	hapi.UseMiddleware(rateLimitMiddleware(hapi, limiter))
+	hapi.UseMiddleware(floodGuardMiddleware(hapi, limiter))
 	hapi.UseMiddleware(rejectNulBytesMiddleware(hapi))
 
 	// App authentication runs after rate limiting, deliberately. An
@@ -67,6 +67,14 @@ func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter 
 	// discarded request cost a query on apps, turning the credential check
 	// into the cheapest available amplification vector.
 	hapi.UseMiddleware(appAuthMiddleware(hapi, s, authCfg))
+
+	// The policy limiter runs last, after authentication, because whose budget
+	// a request spends depends on which app it proved it belongs to — an
+	// authenticated app is billed to itself at its own tier rather than to the
+	// address it dialled from. The flood guard above is what keeps that
+	// ordering from making credential verification a free amplification
+	// vector.
+	hapi.UseMiddleware(rateLimitMiddleware(hapi, limiter))
 
 	registerSubmissionRoutes(hapi, s)
 	registerAuthRoutes(hapi, s, authCfg)
