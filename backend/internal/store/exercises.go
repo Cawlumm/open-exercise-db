@@ -27,7 +27,11 @@ const defaultPerPage = 50
 // pagination fields is an exact match against a taxonomy slug. A zero-value
 // field means "no filter" for that dimension.
 type ExerciseFilter struct {
-	Q string // case-insensitive; every whitespace-separated word must appear in name or aliases
+	// Q is case-insensitive free text. Every whitespace-separated word must
+	// match somewhere on the row — its name, an alias, or one of its taxonomy
+	// values — so adding a word narrows the search. Name matches rank above
+	// rows that qualified only through a facet; see termMatchSQL.
+	Q string
 	// Slug is an exact match on the human-readable identifier. Every response
 	// carries a slug, so a consumer that stored one previously had no way to
 	// look it back up: the path takes a UUID and there was no slug filter, so
@@ -58,7 +62,7 @@ const exerciseRevisionColumns = `
 // filtered per ExerciseFilter, alongside the total matching row count
 // (ignoring pagination) for the response envelope.
 func (s *ExerciseStore) List(ctx context.Context, filter ExerciseFilter) ([]model.Exercise, int, error) {
-	where, args := buildExerciseWhere(filter)
+	where, args, termParams := buildExerciseWhere(filter)
 
 	total, err := s.countWhere(ctx, where, args)
 	if err != nil {
@@ -76,7 +80,7 @@ func (s *ExerciseStore) List(ctx context.Context, filter ExerciseFilter) ([]mode
 	offset := (page - 1) * perPage
 
 	listArgs := append(append([]any{}, args...), perPage, offset)
-	orderBy, listArgs := exerciseOrderBy(filter.Q, listArgs)
+	orderBy, listArgs := exerciseOrderBy(filter.Q, listArgs, termParams)
 	query := fmt.Sprintf(`
 		SELECT %s
 		FROM exercises e
@@ -276,9 +280,13 @@ func (s *ExerciseStore) countWhere(ctx context.Context, where string, args []any
 // shared by List and its count query. It always includes
 // status='published' per docs/PHASE1_BUILD_PLAN.md WO-2: nothing
 // unpublished is visible through this store method.
-func buildExerciseWhere(filter ExerciseFilter) (string, []any) {
+// buildExerciseWhere also reports the positional parameters holding each search
+// term's LIKE pattern, so the ORDER BY can reuse them to tell a name match from
+// a facet-only one without binding the same patterns a second time.
+func buildExerciseWhere(filter ExerciseFilter) (string, []any, []int) {
 	conditions := []string{"e.status = 'published'"}
 	var args []any
+	var termParams []int
 
 	addEq := func(column, value string) {
 		if value == "" {
@@ -312,10 +320,8 @@ func buildExerciseWhere(filter ExerciseFilter) (string, []any) {
 		// — but safe and correct are different properties.
 		args = append(args, "%"+escapeLikePattern(term)+"%")
 		n := len(args)
-		conditions = append(conditions, fmt.Sprintf(
-			`(r.name ILIKE $%d ESCAPE '\' OR EXISTS (SELECT 1 FROM unnest(r.aliases) AS alias WHERE alias ILIKE $%d ESCAPE '\'))`,
-			n, n,
-		))
+		termParams = append(termParams, n)
+		conditions = append(conditions, fmt.Sprintf(termMatchSQL, n, n, n, n, n, n, n, n, n))
 	}
 	addEq("e.slug", filter.Slug)
 	addEq("r.muscle_group", filter.MuscleGroup)
@@ -324,8 +330,57 @@ func buildExerciseWhere(filter ExerciseFilter) (string, []any) {
 	addEq("r.mechanic", filter.Mechanic)
 	addEq("r.level", filter.Level)
 
-	return strings.Join(conditions, " AND "), args
+	return strings.Join(conditions, " AND "), args, termParams
 }
+
+// termMatchSQL is what one search word has to match for a row to qualify.
+//
+// Names and aliases are the obvious half. The controlled vocabularies are the
+// half this API was missing, and it made search unusable for the thing people
+// actually type: `q=kettlebells` returned the one exercise with that word in
+// its name rather than the sixty-odd that use them, and `q=quadriceps` returned
+// two instead of the ninety that train them. A consumer's only recourse was to
+// download the catalog and filter it client-side — which is exactly what an API
+// like this exists to stop them doing.
+//
+// The facets stay available as their own exact-match filters. This is not a
+// replacement for `?equipment=kettlebells`; it is what makes a single search box
+// work, and it composes with the filters rather than competing with them —
+// `q=bench&equipment=barbell` still narrows.
+//
+// Matched with ILIKE rather than equality because the vocabularies are slugs
+// and people do not type slugs: "kettlebell" has to find `kettlebells`, "body"
+// has to find `body-only`. Substring matching also means a hyphenated slug is
+// reachable word by word, so `q=body only` works without anyone knowing the
+// slug's spelling.
+//
+// This does not use the facet indexes — ILIKE cannot — so it is a sequential
+// scan over the published rows. At this corpus size that is the right trade:
+// the table is under a thousand rows and the whole query stays well inside the
+// cache window it is served from. It is also the thing to revisit first if the
+// corpus grows an order of magnitude, at which point trigram indexes
+// (pg_trgm + GIN) are the natural next step rather than full-text search, for
+// the locale reasons exerciseOrderBy already documents.
+const termMatchSQL = `(
+	r.name ILIKE $%d ESCAPE '\'
+	OR EXISTS (SELECT 1 FROM unnest(r.aliases) AS alias WHERE alias ILIKE $%d ESCAPE '\')
+	OR EXISTS (SELECT 1 FROM unnest(r.secondary_muscles) AS sm WHERE sm ILIKE $%d ESCAPE '\')
+	OR r.muscle_group ILIKE $%d ESCAPE '\'
+	OR r.equipment ILIKE $%d ESCAPE '\'
+	OR r.category ILIKE $%d ESCAPE '\'
+	OR r.mechanic ILIKE $%d ESCAPE '\'
+	OR r.force ILIKE $%d ESCAPE '\'
+	OR r.level ILIKE $%d ESCAPE '\'
+)`
+
+// nameOrAliasMatchSQL is the same predicate narrowed to the fields that carry a
+// name. The ORDER BY uses it to separate "this row is called what you typed"
+// from "this row merely uses that equipment", reusing the parameters the WHERE
+// clause already bound.
+const nameOrAliasMatchSQL = `(
+	r.name ILIKE $%d ESCAPE '\'
+	OR EXISTS (SELECT 1 FROM unnest(r.aliases) AS alias WHERE alias ILIKE $%d ESCAPE '\')
+)`
 
 // exerciseOrderBy returns the ORDER BY clause for a list query, plus the args
 // slice it may have appended a parameter to.
@@ -351,7 +406,12 @@ func buildExerciseWhere(filter ExerciseFilter) (string, []any) {
 // how much of the name the query accounts for. e.id ASC stays as the final
 // tiebreak so the ordering is total and pagination cannot duplicate or drop a
 // row across a page boundary.
-func exerciseOrderBy(q string, listArgs []any) (string, []any) {
+// Since a term may now match a facet, a fourth tier sits below the name tiers:
+// rows that only qualified because of their equipment, muscle or category. That
+// separation is what keeps the facet search from drowning the obvious answer —
+// `q=press` matches every row whose category is powerlifting, and without a tier
+// between them "Bench Press" would compete with those on name length alone.
+func exerciseOrderBy(q string, listArgs []any, termParams []int) (string, []any) {
 	q = strings.TrimSpace(q)
 	if q == "" {
 		return "r.name ASC, e.id ASC", listArgs
@@ -367,15 +427,31 @@ func exerciseOrderBy(q string, listArgs []any) (string, []any) {
 	// exactly why it would have gone unnoticed.
 	listArgs = append(listArgs, q, escapeLikePattern(q))
 	exact, prefix := len(listArgs)-1, len(listArgs)
+
+	// "Every term is in the name or an alias" — the condition the WHERE clause
+	// used to require of everything. Rows meeting it are name matches; rows that
+	// passed only via a facet fall to the bottom tier. With no terms (a query of
+	// only stopword-ish whitespace) this is empty and the arm is skipped, which
+	// leaves the original three tiers exactly as they were.
+	nameTier := "FALSE"
+	if len(termParams) > 0 {
+		parts := make([]string, 0, len(termParams))
+		for _, n := range termParams {
+			parts = append(parts, fmt.Sprintf(nameOrAliasMatchSQL, n, n))
+		}
+		nameTier = strings.Join(parts, " AND ")
+	}
+
 	return fmt.Sprintf(`
 		CASE
 			WHEN lower(r.name) = lower($%d) THEN 0
 			WHEN lower(r.name) LIKE lower($%d) || '%%' ESCAPE '\' THEN 1
-			ELSE 2
+			WHEN %s THEN 2
+			ELSE 3
 		END ASC,
 		length(r.name) ASC,
 		r.name ASC,
-		e.id ASC`, exact, prefix), listArgs
+		e.id ASC`, exact, prefix, nameTier), listArgs
 }
 
 // maxSearchTerms bounds how many words one query may be split into.

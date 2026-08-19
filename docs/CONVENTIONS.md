@@ -176,7 +176,7 @@ Handlers are plain functions — no framework context object, so they're trivial
 
 ```go
 type ListExercisesInput struct {
-    Query       string `query:"q" doc:"Free-text search over name and aliases"`
+    Query       string `query:"q" doc:"Free-text search over name, aliases and taxonomy"`
     MuscleGroup string `query:"muscle_group"`
     Locale      string `query:"locale" doc:"BCP-47; falls back to English"`
     Page        int    `query:"page" minimum:"1" default:"1"`
