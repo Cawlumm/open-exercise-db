@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Cawlumm/open-exercise-db/internal/model"
 )
@@ -369,4 +370,192 @@ func sameNamesInOrder(exercises []model.Exercise, want []string) bool {
 // unique, valid slugs.
 func slugify(name string) string {
 	return strings.ToLower(strings.ReplaceAll(name, " ", "-"))
+}
+
+// searchCorpus is a small fixture set chosen so each assertion below can only
+// pass for the right reason: the kettlebell rows do not say "kettlebell" in
+// their names, and the quadriceps rows do not say "quadriceps".
+func seedSearchCorpus(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	for _, f := range []exerciseFixture{
+		{slug: "goblet-squat", name: "Goblet Squat", muscleGroup: "quadriceps", equipment: "kettlebells", category: "strength", force: "push", level: "beginner"},
+		{slug: "kettlebell-swing", name: "Swing", muscleGroup: "glutes", equipment: "kettlebells", category: "strength", force: "pull", level: "intermediate"},
+		{slug: "front-squat", name: "Front Squat", muscleGroup: "quadriceps", equipment: "barbell", category: "olympic-weightlifting", force: "push", level: "expert"},
+		{slug: "bench-press", name: "Bench Press", muscleGroup: "chest", secondary: []string{"triceps"}, equipment: "barbell", category: "powerlifting", force: "push", level: "beginner"},
+		{slug: "incline-bench-press", name: "Incline Bench Press", muscleGroup: "chest", equipment: "barbell", category: "strength", force: "push", level: "intermediate"},
+		{slug: "kettlebell-press", name: "Kettlebell Press", muscleGroup: "shoulders", equipment: "kettlebells", category: "strength", force: "push", level: "beginner"},
+	} {
+		seedExercise(t, ctx, pool, f)
+	}
+}
+
+func namesOf(exercises []model.Exercise) []string {
+	out := make([]string, 0, len(exercises))
+	for _, e := range exercises {
+		out = append(out, e.CurrentRevision.Name)
+	}
+	return out
+}
+
+// The defect this fixes: search matched names and aliases only, so the words
+// people actually type into a single search box — a muscle, a piece of
+// equipment — found almost nothing. `q=kettlebells` returned the one exercise
+// with the word in its name rather than every exercise that uses them, which
+// left a consumer no option but to download the catalog and filter it locally.
+func TestList_SearchMatchesEquipment(t *testing.T) {
+	store, pool := newTestStore(t)
+	ctx := context.Background()
+	seedSearchCorpus(t, ctx, pool)
+
+	got, total, err := store.Exercises.List(ctx, ExerciseFilter{Q: "kettlebell"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("total = %d, want 3 (%v)", total, namesOf(got))
+	}
+	// The one that says so in its name comes first; the two that merely use
+	// kettlebells follow.
+	if got[0].CurrentRevision.Name != "Kettlebell Press" {
+		t.Errorf("first result = %q, want the name match first (%v)", got[0].CurrentRevision.Name, namesOf(got))
+	}
+}
+
+func TestList_SearchMatchesMuscleGroupAndSecondary(t *testing.T) {
+	store, pool := newTestStore(t)
+	ctx := context.Background()
+	seedSearchCorpus(t, ctx, pool)
+
+	quads, _, err := store.Exercises.List(ctx, ExerciseFilter{Q: "quadriceps"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(quads) != 2 {
+		t.Errorf("quadriceps -> %v, want the two quad exercises", namesOf(quads))
+	}
+
+	// A secondary muscle counts too: someone looking for triceps work should
+	// find the press that trains them second.
+	tris, _, err := store.Exercises.List(ctx, ExerciseFilter{Q: "triceps"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tris) != 1 || tris[0].CurrentRevision.Name != "Bench Press" {
+		t.Errorf("triceps -> %v, want [Bench Press]", namesOf(tris))
+	}
+}
+
+func TestList_SearchMatchesCategoryForceAndLevel(t *testing.T) {
+	store, pool := newTestStore(t)
+	ctx := context.Background()
+	seedSearchCorpus(t, ctx, pool)
+
+	for _, tc := range []struct {
+		q    string
+		want int
+	}{
+		{"powerlifting", 1},
+		{"olympic", 1}, // substring of the slug, because nobody types "olympic-weightlifting"
+		{"expert", 1},
+		{"pull", 1},
+	} {
+		got, total, err := store.Exercises.List(ctx, ExerciseFilter{Q: tc.q})
+		if err != nil {
+			t.Fatalf("list %q: %v", tc.q, err)
+		}
+		if total != tc.want {
+			t.Errorf("q=%q -> %d (%v), want %d", tc.q, total, namesOf(got), tc.want)
+		}
+	}
+}
+
+// Facet matching must not drown the obvious answer. "press" is in three names
+// here and is also nothing's facet, but the ranking has to keep exact and
+// prefix name matches on top regardless of what else qualified.
+func TestList_NameMatchesOutrankFacetOnlyMatches(t *testing.T) {
+	store, pool := newTestStore(t)
+	ctx := context.Background()
+	seedSearchCorpus(t, ctx, pool)
+
+	got, _, err := store.Exercises.List(ctx, ExerciseFilter{Q: "squat"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) < 2 {
+		t.Fatalf("got %v, want both squats", namesOf(got))
+	}
+	for _, e := range got {
+		if !strings.Contains(strings.ToLower(e.CurrentRevision.Name), "squat") {
+			t.Errorf("facet-only match %q ranked among name matches (%v)", e.CurrentRevision.Name, namesOf(got))
+		}
+	}
+
+	// A term that only exists as a facet still finds its rows — it just sits
+	// below anything matching by name.
+	mixed, _, err := store.Exercises.List(ctx, ExerciseFilter{Q: "press"})
+	if err != nil {
+		t.Fatalf("list press: %v", err)
+	}
+	if mixed[0].CurrentRevision.Name != "Bench Press" {
+		t.Errorf("first = %q, want the shortest exact-ish name match first (%v)", mixed[0].CurrentRevision.Name, namesOf(mixed))
+	}
+}
+
+// Terms still AND together, and they may now be satisfied by different fields:
+// "barbell bench" is one word of equipment and one of name.
+func TestList_SearchTermsCombineAcrossNameAndFacets(t *testing.T) {
+	store, pool := newTestStore(t)
+	ctx := context.Background()
+	seedSearchCorpus(t, ctx, pool)
+
+	got, total, err := store.Exercises.List(ctx, ExerciseFilter{Q: "barbell bench"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if total != 2 {
+		t.Errorf("barbell bench -> %d (%v), want the two barbell benches", total, namesOf(got))
+	}
+
+	// Word order stays irrelevant, as it was before this change.
+	reversed, reversedTotal, err := store.Exercises.List(ctx, ExerciseFilter{Q: "bench barbell"})
+	if err != nil {
+		t.Fatalf("list reversed: %v", err)
+	}
+	if reversedTotal != total {
+		t.Errorf("word order changed the result: %d vs %d (%v)", reversedTotal, total, namesOf(reversed))
+	}
+}
+
+// Free-text search composes with the explicit facet filters rather than
+// replacing them: q narrows within the filter, not around it.
+func TestList_SearchComposesWithFacetFilters(t *testing.T) {
+	store, pool := newTestStore(t)
+	ctx := context.Background()
+	seedSearchCorpus(t, ctx, pool)
+
+	got, total, err := store.Exercises.List(ctx, ExerciseFilter{Q: "press", Equipment: "kettlebells"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if total != 1 || got[0].CurrentRevision.Name != "Kettlebell Press" {
+		t.Errorf("q=press&equipment=kettlebells -> %v, want [Kettlebell Press]", namesOf(got))
+	}
+}
+
+// LIKE metacharacters stay inert now that they reach more columns: a search for
+// a literal percent must not match every row through a facet either.
+func TestList_SearchWildcardsRemainLiteralAcrossFacets(t *testing.T) {
+	store, pool := newTestStore(t)
+	ctx := context.Background()
+	seedSearchCorpus(t, ctx, pool)
+
+	for _, q := range []string{"%", "_", `\`} {
+		_, total, err := store.Exercises.List(ctx, ExerciseFilter{Q: q})
+		if err != nil {
+			t.Fatalf("list %q: %v", q, err)
+		}
+		if total != 0 {
+			t.Errorf("q=%q matched %d rows; wildcards must be literal", q, total)
+		}
+	}
 }

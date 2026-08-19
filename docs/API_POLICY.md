@@ -112,6 +112,32 @@ this header yourself — the Fetch spec forbids scripts from overriding `User-Ag
 requests through your own backend and set the header there, the same guidance Open Food Facts
 gives its own browser-based consumers.
 
+## What search matches
+
+`?q=` is one search box, not a name lookup. Each whitespace-separated word is matched
+against an exercise's **name, aliases, muscles (primary and secondary), equipment,
+category, mechanic, force and level** — so `?q=kettlebells` returns every exercise that
+uses them, not only the ones with the word in their name.
+
+Every word must match somewhere, in any order, so adding a word narrows the result:
+`?q=barbell bench` finds barbell bench presses because one word matched the equipment and
+the other the name.
+
+Two things worth knowing:
+
+- **Name matches rank first.** A row that matched only through its taxonomy sorts below
+  every row whose name matched, so `?q=press` still puts "Bench Press" above everything
+  that merely shares a category.
+- **This composes with the filters, it does not replace them.** `?q=press&equipment=kettlebells`
+  narrows within the filter. When you know the exact taxonomy slug, the filter is cheaper
+  and exact — use it. `?q=` is for the case where a person typed something and you do not
+  know which dimension they meant.
+
+Matching is substring-based against the taxonomy slugs, which is deliberate: nobody types
+`olympic-weightlifting`, so `?q=olympic` finds it. There is no stemming or fuzzy matching —
+`?q=squats` will not find "Squat". Ranking is exact name, then name prefix, then name
+substring, then taxonomy-only.
+
 ## Debounce your search (not optional)
 
 `GET /exercises` is the endpoint a live type-ahead search hits, and it's easy to blow through

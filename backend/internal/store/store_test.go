@@ -160,6 +160,8 @@ type exerciseFixture struct {
 	name         string
 	aliases      []string
 	muscleGroup  string
+	secondary    []string
+	force        string
 	equipment    string
 	category     string
 	mechanic     string
@@ -183,6 +185,9 @@ func seedExercise(t *testing.T, ctx context.Context, pool *pgxpool.Pool, f exerc
 	if f.instructions == nil {
 		f.instructions = []string{"Step one."}
 	}
+	if f.secondary == nil {
+		f.secondary = []string{}
+	}
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -197,20 +202,23 @@ func seedExercise(t *testing.T, ctx context.Context, pool *pgxpool.Pool, f exerc
 		t.Fatalf("seed exercise %s: %v", f.slug, err)
 	}
 
-	var mechanic, level *string
+	var mechanic, level, force *string
 	if f.mechanic != "" {
 		mechanic = &f.mechanic
 	}
 	if f.level != "" {
 		level = &f.level
 	}
+	if f.force != "" {
+		force = &f.force
+	}
 
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO exercise_revisions
-			(exercise_id, name, aliases, muscle_group, secondary_muscles, category, equipment, mechanic, level, instructions, status)
-		 VALUES ($1, $2, $3, $4, '{}', $5, $6, $7, $8, $9, 'approved')
+			(exercise_id, name, aliases, muscle_group, secondary_muscles, category, equipment, mechanic, force, level, instructions, status)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'approved')
 		 RETURNING id`,
-		exerciseID, f.name, f.aliases, f.muscleGroup, f.category, f.equipment, mechanic, level, f.instructions,
+		exerciseID, f.name, f.aliases, f.muscleGroup, f.secondary, f.category, f.equipment, mechanic, force, level, f.instructions,
 	).Scan(&revisionID); err != nil {
 		t.Fatalf("seed revision for %s: %v", f.slug, err)
 	}

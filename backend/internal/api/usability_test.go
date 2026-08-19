@@ -430,12 +430,20 @@ func TestSearchIsWordOrderIndependent(t *testing.T) {
 	s, pool := newTestStore(t)
 	ctx := context.Background()
 
-	for _, name := range []string{
-		"Barbell Bench Press", "Dumbbell Bench Press", "Bench Dips", "Barbell Squat",
+	// Equipment is per-exercise rather than "barbell" for everything. It was
+	// uniform when search only looked at names, so a dumbbell exercise labelled
+	// barbell changed nothing; now that a word may match the taxonomy, seeding
+	// "Dumbbell Bench Press" as barbell equipment would make it a legitimate hit
+	// for `q=barbell bench press` and quietly move what this test measures.
+	for _, f := range []struct{ name, equipment string }{
+		{"Barbell Bench Press", "barbell"},
+		{"Dumbbell Bench Press", "dumbbell"},
+		{"Bench Dips", "body-only"},
+		{"Barbell Squat", "barbell"},
 	} {
 		seedExercise(t, ctx, pool, exerciseFixture{
-			slug: slugify(name), name: name,
-			muscleGroup: "chest", equipment: "barbell", category: "strength",
+			slug: slugify(f.name), name: f.name,
+			muscleGroup: "chest", equipment: f.equipment, category: "strength",
 		})
 	}
 
