@@ -204,3 +204,53 @@ func TestConfig_WithDefaultsFillsInvalidRules(t *testing.T) {
 		t.Errorf("IdleTTL = %v, want default %v", resolved.IdleTTL, def.IdleTTL)
 	}
 }
+
+// An <img> tag cannot send headers, so every image a browser loads is
+// unidentified by construction. Downgrading those to the strict tier meant a
+// grid rendered two thumbnails and then received 429s carrying a JSON body,
+// which Chrome's opaque-response blocking rejects — a blank image with no
+// explanation available to the page.
+func TestAllow_ImagesAreExemptFromTheUnidentifiedDowngrade(t *testing.T) {
+	l := NewLimiter(Config{
+		Image:        Rule{RPM: 600, Burst: 600},
+		Read:         Rule{RPM: 120, Burst: 120},
+		Unidentified: Rule{RPM: 5, Burst: 5},
+	})
+	defer l.Close()
+
+	// Fifty thumbnails, the size of one picker screen, all unidentified.
+	for i := range 50 {
+		d := l.Allow("1.2.3.4", TierImage, false)
+		if !d.Allowed {
+			t.Fatalf("image %d of 50 was rejected; a grid cannot render", i+1)
+		}
+		if d.EffectiveTier != TierImage {
+			t.Fatalf("image %d billed to %q, want the image tier", i+1, d.EffectiveTier)
+		}
+	}
+
+	// Every other tier still downgrades — the exemption is for images only,
+	// because they are the only requests that cannot comply.
+	if d := l.Allow("5.6.7.8", TierRead, false); d.EffectiveTier != Unidentified {
+		t.Errorf("unidentified read billed to %q, want the unidentified tier", d.EffectiveTier)
+	}
+	if d := l.Allow("5.6.7.8", TierSearch, false); d.EffectiveTier != Unidentified {
+		t.Errorf("unidentified search billed to %q, want the unidentified tier", d.EffectiveTier)
+	}
+}
+
+// Exempt from identification is not exempt from limiting: the image tier is
+// generous, not unbounded.
+func TestAllow_ImagesAreStillLimited(t *testing.T) {
+	l := NewLimiter(Config{Image: Rule{RPM: 3, Burst: 3}})
+	defer l.Close()
+
+	for i := range 3 {
+		if d := l.Allow("1.2.3.4", TierImage, false); !d.Allowed {
+			t.Fatalf("image %d was rejected inside the burst", i+1)
+		}
+	}
+	if d := l.Allow("1.2.3.4", TierImage, false); d.Allowed {
+		t.Error("image tier allowed a request past its burst; it must still be bounded")
+	}
+}

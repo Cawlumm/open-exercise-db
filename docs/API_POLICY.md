@@ -21,7 +21,8 @@ to serve; the full-catalog export costs the most.
 | Tier | Applies to | Limit | Why |
 |---|---|---|---|
 | **App** | Any read, once a valid app credential is presented | **600 req/min/app** (burst 600) | Billed to the app, not to its address — see [Register an app for a bigger budget](#register-an-app-for-a-bigger-budget) |
-| Read | `GET /exercises/{id}`, `GET /meta/*`, `GET /images/{id}` | 120 req/min/IP (burst 120) | Cheap, cached, single-row/short-list reads — an id-keyed image fetch is one more instance of the same shape, and its response carries a long `immutable` `Cache-Control` on top |
+| **Images** | `GET /images/{id}`, `GET /images/{id}/{variant}` | **600 req/min/IP** (burst 600) | Exempt from the unidentified tier — an `<img>` tag cannot send headers, so a browser can never identify one. Immutable and cached for a year, so each is fetched once per client |
+| Read | `GET /exercises/{id}`, `GET /meta/*` | 120 req/min/IP (burst 120) | Cheap, cached, single-row/short-list reads — an id-keyed image fetch is one more instance of the same shape, and its response carries a long `immutable` `Cache-Control` on top |
 | Search | `GET /exercises` | 120 req/min/IP (burst 120) | Matched to Read rather than set below it — live lookup is the primary integration model, so search is *its* main endpoint. Still assumes a *debounced* client, not a per-keystroke one — see [Debounce your search](#debounce-your-search-not-optional) |
 | Export | `GET /exercises/export`, `POST /images` | 5 req/min/IP | The two heaviest requests in the API. The export is the largest response; an upload is the largest *cost* — it buffers megabytes, decodes them, re-encodes them and writes to object storage, which no cache can absorb. See [Mirror the dump, don't poll it](#mirror-the-dump-dont-poll-it). Uploading a batch is meant to be paced: back off on `429` rather than retrying immediately, and note that the per-app pending-upload quota, not this limit, is what actually bounds how much you can have in review at once |
 | Unidentified | Any request that identifies itself with neither a conformant `User-Agent` nor `X-OEDB-Client` | 5 req/min/IP, replacing whatever tier the endpoint would otherwise use | See [User-Agent requirement](#user-agent-requirement) |
@@ -178,6 +179,27 @@ Matching is substring-based against the taxonomy slugs, which is deliberate: nob
 `olympic-weightlifting`, so `?q=olympic` finds it. There is no stemming or fuzzy matching —
 `?q=squats` will not find "Squat". Ranking is exact name, then name prefix, then name
 substring, then taxonomy-only.
+
+## Images are not subject to the identification rule
+
+`GET /images/{id}` is exempt from the [User-Agent requirement](#user-agent-requirement)
+and its strict tier. It gets **600 req/min** whether or not the caller identifies
+itself.
+
+This is not a loophole, it is the only workable behaviour: an `<img>` tag **cannot
+send headers**. The browser forbids it, so an image request can carry neither a
+conformant `User-Agent` nor `X-OEDB-Client`. Under the strict tier a grid of fifty
+thumbnails rendered two and then received `429`s carrying a JSON error body, which
+Chrome's opaque-response blocking rejects outright — `ERR_BLOCKED_BY_ORB`, a blank
+image, and nothing the page can inspect to find out why.
+
+Serving these generously is safe in a way it would not be for search: the responses
+are immutable with a year-long `Cache-Control`, so each is fetched once per client;
+the bytes come from object storage rather than the database; and the ids are opaque,
+so there is nothing cheap to enumerate.
+
+You still do not need to do anything special — just point `<img src>` at the URL in
+`Exercise.images[].url`.
 
 ## Register an app for a bigger budget
 

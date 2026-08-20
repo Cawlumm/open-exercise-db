@@ -81,7 +81,7 @@ func registerImageRoutes(hapi huma.API, s *store.Store, mediaStore media.Store) 
 		Path:        "/api/v1/images/{id}",
 		Summary:     "Fetch a re-hosted exercise image's bytes",
 		Tags:        []string{"images"},
-		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierRead},
+		Metadata:    map[string]any{rateLimitTierKey: ratelimit.TierImage},
 		Errors:      []int{http.StatusNotFound, http.StatusTooManyRequests},
 		// Declared explicitly (rather than left to huma's default []byte
 		// schema, which documents as an opaque base64 string per api.go's
@@ -114,7 +114,7 @@ func registerImageRoutes(hapi huma.API, s *store.Store, mediaStore media.Store) 
 			"Today every image has exactly one, full, whose URL is the same as " +
 			"Image.url — smaller sizes will appear here without url changing.",
 		Tags:     []string{"images"},
-		Metadata: map[string]any{rateLimitTierKey: ratelimit.TierRead},
+		Metadata: map[string]any{rateLimitTierKey: ratelimit.TierImage},
 		Errors:   []int{http.StatusNotFound, http.StatusTooManyRequests},
 		Responses: map[string]*huma.Response{
 			"200": {
