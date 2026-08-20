@@ -43,21 +43,29 @@ type filterParam struct {
 
 // taxonomyFiltersOf collects the non-empty taxonomy filters on a list request.
 func taxonomyFiltersOf(input *ListExercisesInput) []filterParam {
-	all := []filterParam{
-		{param: "muscle_group", facet: "muscle_group", value: input.MuscleGroup, metaPath: "/api/v1/meta/muscle-groups"},
-		{param: "equipment", facet: "equipment", value: input.Equipment, metaPath: "/api/v1/meta/equipment"},
-		{param: "category", facet: "category", value: input.Category, metaPath: "/api/v1/meta/categories"},
+	// One entry per value, not per parameter: every value a caller supplied is
+	// validated, so ?muscle_group=chest,banana names banana rather than passing
+	// because its first value happened to be real.
+	groups := []struct {
+		param, facet, metaPath string
+		values                 []string
+	}{
+		{"muscle_group", "muscle_group", "/api/v1/meta/muscle-groups", input.MuscleGroup},
+		{"equipment", "equipment", "/api/v1/meta/equipment", input.Equipment},
+		{"category", "category", "/api/v1/meta/categories", input.Category},
 		// mechanic, force and level are taxonomy facets but have no /meta route
 		// (docs/DESIGN.md lists only four). Their vocabularies are small and
 		// fixed, so the error spells the valid values out instead.
-		{param: "mechanic", facet: "mechanic", value: input.Mechanic},
-		{param: "level", facet: "level", value: input.Level},
+		{"mechanic", "mechanic", "", input.Mechanic},
+		{"level", "level", "", input.Level},
 	}
 
 	var set []filterParam
-	for _, f := range all {
-		if f.value != "" {
-			set = append(set, f)
+	for _, g := range groups {
+		for _, v := range g.values {
+			if v = strings.TrimSpace(v); v != "" {
+				set = append(set, filterParam{param: g.param, facet: g.facet, value: v, metaPath: g.metaPath})
+			}
 		}
 	}
 	return set
@@ -88,15 +96,16 @@ func validateTaxonomyFilters(ctx context.Context, s *store.Store, input *ListExe
 	// Index by facet so the message can be built in the caller's parameter
 	// order rather than whatever order Postgres returned rows in — a stable
 	// message is one a client can match on and a human can diff.
-	bad := make(map[string]string, len(unknown))
+	// Keyed by facet AND slug: a facet may now carry several values, and keying
+	// by facet alone would report only whichever bad one Postgres returned last.
+	bad := make(map[store.FacetSlug]bool, len(unknown))
 	for _, u := range unknown {
-		bad[u.Facet] = u.Slug
+		bad[store.FacetSlug{Facet: u.Facet, Slug: u.Slug}] = true
 	}
 
 	var details []error
 	for _, f := range filters {
-		slug, ok := bad[f.facet]
-		if !ok || slug != f.value {
+		if !bad[store.FacetSlug{Facet: f.facet, Slug: f.value}] {
 			continue
 		}
 		details = append(details, &huma.ErrorDetail{

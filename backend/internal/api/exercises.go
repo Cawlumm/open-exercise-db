@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -93,18 +94,38 @@ type ListExercisesInput struct {
 	// Every response carries a slug, so a consumer that stored one had no way
 	// to look it back up: the path takes a UUID and there was no slug filter,
 	// leaving only a substring search that could match several rows or none.
-	Slug        string `query:"slug" doc:"Exact match on an exercise's slug — the stable human-readable identifier returned in every response"`
-	MuscleGroup string `query:"muscle_group" doc:"Taxonomy slug filter; see GET /meta/muscle-groups"`
-	Equipment   string `query:"equipment" doc:"Taxonomy slug filter; see GET /meta/equipment"`
-	Category    string `query:"category" doc:"Taxonomy slug filter; see GET /meta/categories"`
-	Mechanic    string `query:"mechanic" doc:"Taxonomy slug filter: compound or isolation"`
+	// The filters below accept several values, comma-separated or repeated.
+	// Values within one filter are OR'd, and the filters are AND'd — what a
+	// faceted picker means by "chest or lats, with a barbell".
+	//
+	// They were single strings, so a repeated parameter was silently reduced to
+	// its first value: ?muscle_group=chest&muscle_group=lats answered 200 with
+	// only the chest rows. Nothing told the caller half their filter had been
+	// discarded, which is worse than an error.
+	Slug        []string `query:"slug" doc:"Exact match on an exercise's slug — the stable human-readable identifier returned in every response. Repeatable."`
+	MuscleGroup []string `query:"muscle_group" doc:"Taxonomy slug filter; see GET /meta/muscle-groups. Repeatable — several values match any of them."`
+	Equipment   []string `query:"equipment" doc:"Taxonomy slug filter; see GET /meta/equipment. Repeatable — several values match any of them."`
+	Category    []string `query:"category" doc:"Taxonomy slug filter; see GET /meta/categories. Repeatable — several values match any of them."`
+	Mechanic    []string `query:"mechanic" doc:"Taxonomy slug filter: compound or isolation. Repeatable."`
 	// "expert", not "advanced" — the seeded vocabulary comes from
 	// free-exercise-db, which uses expert as its top level. This doc said
 	// "advanced" and no such term has ever existed, so /docs and the generated
 	// OpenAPI spec were both telling callers to send a value guaranteed to
 	// match nothing (and, since filter values are now validated, to be
 	// rejected outright).
-	Level  string `query:"level" doc:"Taxonomy slug filter: beginner, intermediate, or expert"`
+	Level []string `query:"level" doc:"Taxonomy slug filter: beginner, intermediate, or expert. Repeatable."`
+
+	// IDs and SourceIDs re-read a known set in one request.
+	//
+	// A consumer that keeps its own copy of some rows needs to refresh exactly
+	// those rows. Without this the only route was fetching the whole export and
+	// intersecting locally, which is what Lyftr does today — one 300 KB response
+	// to refresh a handful of exercises. SourceIDs answers the migration case:
+	// anyone moving off free-exercise-db holds its identifiers, and export has
+	// always exposed source_id while nothing could query by it.
+	IDs       []string `query:"ids" doc:"Fetch specific exercises by UUID, comma-separated or repeated. Maximum 100 per request."`
+	SourceIDs []string `query:"source_ids" doc:"Fetch specific exercises by their upstream source identifier, comma-separated or repeated. Maximum 100 per request."`
+
 	Locale string `query:"locale" doc:"BCP-47 locale for name/aliases/instructions; falls back to English per-field when untranslated"`
 	PageParams
 }
@@ -304,6 +325,10 @@ func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, inp
 	}
 
 	page, perPage := input.Normalize()
+	if err := validateIDBatch(input); err != nil {
+		return nil, err
+	}
+
 	filter := store.ExerciseFilter{
 		Q:           input.Q,
 		Slug:        input.Slug,
@@ -312,6 +337,8 @@ func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, inp
 		Category:    input.Category,
 		Mechanic:    input.Mechanic,
 		Level:       input.Level,
+		IDs:         input.IDs,
+		SourceIDs:   input.SourceIDs,
 		Page:        page,
 		PerPage:     perPage,
 	}
@@ -541,4 +568,71 @@ func revisionFromModel(rev model.Revision) Revision {
 		Status:           rev.Status,
 		CreatedAt:        rev.CreatedAt,
 	}
+}
+
+// maxIDBatch bounds how many identifiers one request may name.
+//
+// Matches the per_page ceiling: asking for more rows than a page can hold is a
+// request whose answer is silently truncated by pagination, which is a
+// confusing way to discover a limit. It also bounds the array a stranger can
+// make Postgres compare against.
+const maxIDBatch = 100
+
+// validateIDBatch rejects oversized or malformed identifier batches before they
+// reach the database.
+//
+// UUIDs are checked here rather than left to Postgres because e.id is a uuid
+// column: a malformed value makes the whole query fail, so without this one bad
+// identifier in a batch of a hundred turns into a 500 for the entire request
+// instead of a 422 naming the offender.
+func validateIDBatch(input *ListExercisesInput) error {
+	var details []error
+
+	if n := len(input.IDs); n > maxIDBatch {
+		details = append(details, &huma.ErrorDetail{
+			Message:  fmt.Sprintf("at most %d ids per request, got %d", maxIDBatch, n),
+			Location: "query.ids",
+		})
+	}
+	if n := len(input.SourceIDs); n > maxIDBatch {
+		details = append(details, &huma.ErrorDetail{
+			Message:  fmt.Sprintf("at most %d source_ids per request, got %d", maxIDBatch, n),
+			Location: "query.source_ids",
+		})
+	}
+	for _, id := range input.IDs {
+		if id = strings.TrimSpace(id); id != "" && !isUUID(id) {
+			details = append(details, &huma.ErrorDetail{
+				Message:  "not a UUID",
+				Location: "query.ids",
+				Value:    id,
+			})
+		}
+	}
+
+	if len(details) > 0 {
+		return huma.Error422UnprocessableEntity("validation failed", details...)
+	}
+	return nil
+}
+
+// isUUID reports whether s is the canonical 8-4-4-4-12 hex form.
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			isHex := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
+			if !isHex {
+				return false
+			}
+		}
+	}
+	return true
 }

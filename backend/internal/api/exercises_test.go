@@ -86,7 +86,7 @@ func TestListExercises_FilterAndPaginationPassthrough(t *testing.T) {
 	})
 
 	t.Run("filters pass through to the store unchanged", func(t *testing.T) {
-		out, err := ListExercises(ctx, s, "", &ListExercisesInput{MuscleGroup: "chest"})
+		out, err := ListExercises(ctx, s, "", &ListExercisesInput{MuscleGroup: []string{"chest"}})
 		if err != nil {
 			t.Fatalf("ListExercises: unexpected error: %v", err)
 		}

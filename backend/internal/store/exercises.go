@@ -37,14 +37,34 @@ type ExerciseFilter struct {
 	// look it back up: the path takes a UUID and there was no slug filter, so
 	// the only route was a substring search that could match several rows or
 	// none.
-	Slug        string
-	MuscleGroup string
-	Equipment   string
-	Category    string
-	Mechanic    string
-	Level       string
-	Page        int
-	PerPage     int
+	//
+	// The taxonomy filters below take any number of values. Values within one
+	// filter are OR'd and the filters are AND'd together, which is what a
+	// faceted picker means by "chest or lats, with a barbell". Before this they
+	// were single strings, so a repeated parameter was silently reduced to its
+	// first value: ?muscle_group=chest&muscle_group=lats answered 200 with only
+	// the chest rows, which is worse than an error because nothing tells the
+	// caller their filter was discarded.
+	Slug        []string
+	MuscleGroup []string
+	Equipment   []string
+	Category    []string
+	Mechanic    []string
+	Level       []string
+
+	// IDs and SourceIDs fetch a known set in one request.
+	//
+	// A consumer holding its own copy of rows needs to re-read exactly those
+	// rows, and without this the only route was pulling the full export and
+	// intersecting locally — which is what Lyftr does today to refresh its
+	// cache. SourceIDs answers the other half: anyone migrating off
+	// free-exercise-db holds its identifiers, and export exposes source_id
+	// while nothing could query by it.
+	IDs       []string
+	SourceIDs []string
+
+	Page    int
+	PerPage int
 }
 
 // exerciseRevisionColumns is the explicit column list shared by List and
@@ -288,12 +308,21 @@ func buildExerciseWhere(filter ExerciseFilter) (string, []any, []int) {
 	var args []any
 	var termParams []int
 
-	addEq := func(column, value string) {
-		if value == "" {
+	// addIn matches a column against any of the supplied values, dropping empty
+	// ones so a trailing comma or an unset select does not silently become a
+	// filter for the empty string. All-empty behaves as no filter at all.
+	addIn := func(column string, values []string) {
+		kept := make([]string, 0, len(values))
+		for _, v := range values {
+			if v = strings.TrimSpace(v); v != "" {
+				kept = append(kept, v)
+			}
+		}
+		if len(kept) == 0 {
 			return
 		}
-		args = append(args, value)
-		conditions = append(conditions, fmt.Sprintf("%s = $%d", column, len(args)))
+		args = append(args, kept)
+		conditions = append(conditions, fmt.Sprintf("%s = ANY($%d)", column, len(args)))
 	}
 
 	// Each whitespace-separated word must appear somewhere in the name or
@@ -323,12 +352,22 @@ func buildExerciseWhere(filter ExerciseFilter) (string, []any, []int) {
 		termParams = append(termParams, n)
 		conditions = append(conditions, fmt.Sprintf(termMatchSQL, n, n, n, n, n, n, n, n, n))
 	}
-	addEq("e.slug", filter.Slug)
-	addEq("r.muscle_group", filter.MuscleGroup)
-	addEq("r.equipment", filter.Equipment)
-	addEq("r.category", filter.Category)
-	addEq("r.mechanic", filter.Mechanic)
-	addEq("r.level", filter.Level)
+	addIn("e.slug", filter.Slug)
+	addIn("r.muscle_group", filter.MuscleGroup)
+	addIn("r.equipment", filter.Equipment)
+	addIn("r.category", filter.Category)
+	addIn("r.mechanic", filter.Mechanic)
+	addIn("r.level", filter.Level)
+	addIn("e.source_id", filter.SourceIDs)
+
+	// IDs are cast because e.id is a uuid column and the values arrive as text;
+	// without the cast Postgres refuses the comparison rather than coercing it.
+	// Malformed input therefore fails as a query error rather than matching
+	// nothing, so the API layer validates the format before we get here.
+	if ids := nonEmpty(filter.IDs); len(ids) > 0 {
+		args = append(args, ids)
+		conditions = append(conditions, fmt.Sprintf("e.id = ANY($%d::uuid[])", len(args)))
+	}
 
 	return strings.Join(conditions, " AND "), args, termParams
 }
@@ -802,4 +841,15 @@ func insertRevision(ctx context.Context, tx pgx.Tx, exerciseID string, in Import
 		return "", fmt.Errorf("insert revision for exercise %s: %w", exerciseID, err)
 	}
 	return id, nil
+}
+
+// nonEmpty drops blank entries from a filter's values.
+func nonEmpty(values []string) []string {
+	kept := make([]string, 0, len(values))
+	for _, v := range values {
+		if v = strings.TrimSpace(v); v != "" {
+			kept = append(kept, v)
+		}
+	}
+	return kept
 }

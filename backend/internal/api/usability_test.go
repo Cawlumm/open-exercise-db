@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -123,20 +125,20 @@ func TestUnknownFilterValue_IsRejectedWithGuidance(t *testing.T) {
 	}{
 		{
 			name:        "wrong case",
-			input:       &ListExercisesInput{MuscleGroup: "Chest"},
+			input:       &ListExercisesInput{MuscleGroup: []string{"Chest"}},
 			wantInMsg:   []string{"unknown muscle_group", "Chest", "/api/v1/meta/muscle-groups"},
 			wantLoc:     "query.muscle_group",
 			wantSuggest: true,
 		},
 		{
 			name:      "plural guess gets no bogus suggestion",
-			input:     &ListExercisesInput{MuscleGroup: "chests"},
+			input:     &ListExercisesInput{MuscleGroup: []string{"chests"}},
 			wantInMsg: []string{"unknown muscle_group", "chests"},
 			wantLoc:   "query.muscle_group",
 		},
 		{
 			name:      "nonsense equipment",
-			input:     &ListExercisesInput{Equipment: "jetpack"},
+			input:     &ListExercisesInput{Equipment: []string{"jetpack"}},
 			wantInMsg: []string{"unknown equipment", "jetpack"},
 			wantLoc:   "query.equipment",
 		},
@@ -144,7 +146,7 @@ func TestUnknownFilterValue_IsRejectedWithGuidance(t *testing.T) {
 			name: "small vocabulary is listed in full",
 			// "advanced" is the value this parameter's own doc string used to
 			// claim was valid; the real top level is "expert".
-			input:     &ListExercisesInput{Level: "advanced"},
+			input:     &ListExercisesInput{Level: []string{"advanced"}},
 			wantInMsg: []string{"unknown level", "advanced", "beginner", "expert", "intermediate"},
 			wantLoc:   "query.level",
 		},
@@ -193,9 +195,9 @@ func TestKnownFilterValues_StillPass(t *testing.T) {
 	// must stay a 200.
 	for _, in := range []*ListExercisesInput{
 		{},
-		{MuscleGroup: "chest"},
-		{MuscleGroup: "chest", Equipment: "barbell", Category: "strength"},
-		{Level: "expert"},
+		{MuscleGroup: []string{"chest"}},
+		{MuscleGroup: []string{"chest"}, Equipment: []string{"barbell"}, Category: []string{"strength"}},
+		{Level: []string{"expert"}},
 	} {
 		if _, err := ListExercises(ctx, s, "", in); err != nil {
 			t.Errorf("ListExercises(%+v) = %v, want success", in, err)
@@ -220,9 +222,9 @@ func TestUnseededVocabulary_DoesNotRejectEverything(t *testing.T) {
 	ctx := context.Background()
 
 	for _, in := range []*ListExercisesInput{
-		{MuscleGroup: "chest"},
-		{MuscleGroup: "anything-at-all"},
-		{Equipment: "barbell", Category: "strength", Level: "expert"},
+		{MuscleGroup: []string{"chest"}},
+		{MuscleGroup: []string{"anything-at-all"}},
+		{Equipment: []string{"barbell"}, Category: []string{"strength"}, Level: []string{"expert"}},
 	} {
 		if _, err := ListExercises(ctx, s, "", in); err != nil {
 			t.Errorf("ListExercises(%+v) = %v; with no seeded vocabulary the filter must be accepted, "+
@@ -573,7 +575,7 @@ func TestSlugFilter(t *testing.T) {
 		muscleGroup: "chest", equipment: "barbell", category: "strength",
 	})
 
-	out, err := ListExercises(ctx, s, "", &ListExercisesInput{Slug: "bench-press"})
+	out, err := ListExercises(ctx, s, "", &ListExercisesInput{Slug: []string{"bench-press"}})
 	if err != nil {
 		t.Fatalf("ListExercises: %v", err)
 	}
@@ -587,7 +589,7 @@ func TestSlugFilter(t *testing.T) {
 	// An unknown slug is a legitimate empty result, not a validation error:
 	// unlike a taxonomy filter, slugs are not a closed vocabulary published by
 	// a /meta endpoint that a caller could have consulted first.
-	empty, err := ListExercises(ctx, s, "", &ListExercisesInput{Slug: "no-such-slug"})
+	empty, err := ListExercises(ctx, s, "", &ListExercisesInput{Slug: []string{"no-such-slug"}})
 	if err != nil {
 		t.Fatalf("unknown slug should be an empty result, got error: %v", err)
 	}
@@ -808,5 +810,88 @@ func TestIsCompressible_CoversOpenAPI(t *testing.T) {
 		if isCompressible(ct) {
 			t.Errorf("isCompressible(%q) = true, want false", ct)
 		}
+	}
+}
+
+// A repeated filter parameter used to be silently reduced to its first value:
+// ?muscle_group=chest&muscle_group=lats answered 200 with only the chest rows.
+// That is worse than an error — the caller gets a plausible answer and no signal
+// that half their filter was discarded.
+func TestListExercises_RepeatedFilterValuesAreAllApplied(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+
+	for _, f := range []struct{ slug, name, muscle string }{
+		{"bench-press", "Bench Press", "chest"},
+		{"pull-up", "Pull-Up", "lats"},
+		{"squat", "Squat", "quadriceps"},
+	} {
+		seedExercise(t, ctx, pool, exerciseFixture{
+			slug: f.slug, name: f.name, muscleGroup: f.muscle,
+			equipment: "barbell", category: "strength",
+		})
+	}
+
+	out, err := ListExercises(ctx, s, "", &ListExercisesInput{
+		MuscleGroup: []string{"chest", "lats"},
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if out.Body.Total != 2 {
+		t.Errorf("chest+lats returned %d, want 2 — the second value was dropped", out.Body.Total)
+	}
+}
+
+// Every value is validated, not just the first: a typo in the second position
+// must be named rather than passing because position one happened to be real.
+func TestListExercises_RejectsUnknownValueInAnyPosition(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	// Validation fails open on a facet with no terms, so the vocabulary has to
+	// exist for this to be testing anything.
+	seedVocabulary(t, ctx, pool)
+
+	_, err := ListExercises(ctx, s, "", &ListExercisesInput{
+		MuscleGroup: []string{"chest", "banana"},
+	})
+	if err == nil {
+		t.Fatal("want a 422 naming the unknown value")
+	}
+	if !strings.Contains(err.Error(), "banana") && !strings.Contains(fmt.Sprint(err), "validation") {
+		t.Errorf("error did not name the bad value: %v", err)
+	}
+}
+
+// A malformed UUID in a batch must be a 422 naming the offender, not a 500 for
+// the whole request — e.id is a uuid column, so one bad value fails the query.
+func TestListExercises_RejectsMalformedIDs(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+
+	_, err := ListExercises(ctx, s, "", &ListExercisesInput{
+		IDs: []string{"3490fcdf-080a-4731-8f29-a59e0adbb85a", "not-a-uuid"},
+	})
+	if err == nil {
+		t.Fatal("want a 422 for the malformed id")
+	}
+	var se huma.StatusError
+	if errors.As(err, &se) && se.GetStatus() != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want 422 (a bad id must not surface as a server error)", se.GetStatus())
+	}
+}
+
+// The batch is capped so a caller cannot ask for more rows than a page can
+// return and have the answer quietly truncated by pagination.
+func TestListExercises_RejectsOversizedIDBatch(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+
+	ids := make([]string, maxIDBatch+1)
+	for i := range ids {
+		ids[i] = "3490fcdf-080a-4731-8f29-a59e0adbb85a"
+	}
+	if _, err := ListExercises(ctx, s, "", &ListExercisesInput{IDs: ids}); err == nil {
+		t.Fatalf("want a 422 for more than %d ids", maxIDBatch)
 	}
 }

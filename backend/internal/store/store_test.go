@@ -157,6 +157,7 @@ func newTestStore(t *testing.T) (*Store, *pgxpool.Pool) {
 // default so each test only spells out what it's actually asserting on.
 type exerciseFixture struct {
 	slug         string
+	sourceID     string
 	name         string
 	aliases      []string
 	muscleGroup  string
@@ -195,9 +196,13 @@ func seedExercise(t *testing.T, ctx context.Context, pool *pgxpool.Pool, f exerc
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op once committed
 
+	var sourceID *string
+	if f.sourceID != "" {
+		sourceID = &f.sourceID
+	}
 	if err := tx.QueryRow(ctx,
-		`INSERT INTO exercises (slug, status) VALUES ($1, $2) RETURNING id`,
-		f.slug, f.status,
+		`INSERT INTO exercises (slug, source_id, status) VALUES ($1, $2, $3) RETURNING id`,
+		f.slug, sourceID, f.status,
 	).Scan(&exerciseID); err != nil {
 		t.Fatalf("seed exercise %s: %v", f.slug, err)
 	}
