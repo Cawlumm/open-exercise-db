@@ -107,6 +107,11 @@ type RateLimitConfig struct {
 	AppRPM   float64
 	AppBurst int
 
+	// ImageRPM/ImageBurst covers the image byte routes, which are exempt from
+	// the unidentified downgrade because an <img> tag cannot send headers.
+	ImageRPM   float64
+	ImageBurst int
+
 	ReadRPM   float64
 	ReadBurst int
 
@@ -159,6 +164,13 @@ func Load() Config {
 			// address.
 			AppRPM:   getEnvFloat("OEDB_RATELIMIT_APP_RPM", 600),
 			AppBurst: getEnvInt("OEDB_RATELIMIT_APP_BURST", 600),
+
+			// Sized for a grid. A picker showing fifty exercises requests fifty
+			// thumbnails at once; a smaller allowance breaks the screen rather
+			// than protecting anything, and these responses are immutable and
+			// cached for a year, so each one is fetched once per client.
+			ImageRPM:   getEnvFloat("OEDB_RATELIMIT_IMAGE_RPM", 600),
+			ImageBurst: getEnvInt("OEDB_RATELIMIT_IMAGE_BURST", 600),
 
 			// Burst equals RPM: a client may spend a minute's budget at once
 			// and then refill steadily. A burst set to a fraction of the rate

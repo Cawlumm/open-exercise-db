@@ -41,6 +41,25 @@ const (
 	// its budget can have its credential suspended, which an IP cannot.
 	TierApp Tier = "app"
 
+	// TierImage covers the image byte routes, and is the one tier the
+	// unidentified downgrade does not apply to.
+	//
+	// An <img> tag cannot send headers. Not "does not by default" — the browser
+	// forbids it, so an image request can carry neither a conformant User-Agent
+	// nor X-OEDB-Client, and every image a browser loads is unidentified by
+	// construction. Under the strict unidentified budget that meant a grid
+	// rendered its first two thumbnails and then received 429s carrying a JSON
+	// error body, which Chrome's opaque-response blocking rejects outright:
+	// ERR_BLOCKED_BY_ORB, a blank image, and no way for the page to tell why.
+	//
+	// Serving them generously is safe in a way it would not be for search.
+	// These responses are immutable and carry a year-long Cache-Control, so a
+	// client fetches each one once; the bytes come from object storage rather
+	// than the database; and the id is opaque, so there is nothing to enumerate
+	// cheaply. The flood guard still bounds the address, and the edge still
+	// bounds everything.
+	TierImage Tier = "image"
+
 	// TierFlood is the coarse per-address ceiling applied before a request is
 	// authenticated.
 	//
@@ -101,6 +120,7 @@ const DefaultCleanupInterval = 2 * time.Minute
 // env-var parsing.
 type Config struct {
 	Flood        Rule
+	Image        Rule
 	App          Rule
 	Read         Rule
 	Search       Rule
@@ -136,8 +156,12 @@ func DefaultConfig() Config {
 		// caller (even several apps behind one address), low enough that a
 		// single address cannot turn credential verification into a flood of
 		// database lookups.
-		Flood:        Rule{RPM: 1200, Burst: 1200},
-		App:          Rule{RPM: 600, Burst: 600},
+		Flood: Rule{RPM: 1200, Burst: 1200},
+		App:   Rule{RPM: 600, Burst: 600},
+		// Sized for a grid: a picker showing fifty exercises asks for fifty
+		// thumbnails at once, and a limit under that is a limit that breaks the
+		// screen rather than protecting anything.
+		Image:        Rule{RPM: 600, Burst: 600},
 		Read:         Rule{RPM: 120, Burst: 120},
 		Search:       Rule{RPM: 120, Burst: 120},
 		Export:       Rule{RPM: 5, Burst: 2},
@@ -153,6 +177,9 @@ func (c Config) withDefaults() Config {
 	}
 	if !c.App.valid() {
 		c.App = d.App
+	}
+	if !c.Image.valid() {
+		c.Image = d.Image
 	}
 	if !c.Read.valid() {
 		c.Read = d.Read
@@ -184,6 +211,8 @@ func (c Config) rule(tier Tier) Rule {
 		return c.App
 	case TierFlood:
 		return c.Flood
+	case TierImage:
+		return c.Image
 	case Unidentified:
 		return c.Unidentified
 	default:
@@ -315,7 +344,11 @@ type Decision struct {
 // of returning a 429 immediately — neither fits an HTTP handler.
 func (l *Limiter) Allow(key string, tier Tier, identified bool) Decision {
 	effectiveTier := tier
-	if !identified {
+	// Images are exempt from the unidentified downgrade. Every other tier can be
+	// satisfied by a client that identifies itself; an <img> request cannot,
+	// because the browser will not let it send the header. Downgrading it
+	// punishes a caller for something it has no way to do.
+	if !identified && tier != TierImage {
 		effectiveTier = Unidentified
 	}
 	rule := l.cfg.rule(effectiveTier)

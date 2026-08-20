@@ -95,6 +95,7 @@ func main() {
 	limiter := ratelimit.NewLimiter(ratelimit.Config{
 		Flood:        ratelimit.Rule{RPM: cfg.RateLimit.FloodRPM, Burst: cfg.RateLimit.FloodBurst},
 		App:          ratelimit.Rule{RPM: cfg.RateLimit.AppRPM, Burst: cfg.RateLimit.AppBurst},
+		Image:        ratelimit.Rule{RPM: cfg.RateLimit.ImageRPM, Burst: cfg.RateLimit.ImageBurst},
 		Read:         ratelimit.Rule{RPM: cfg.RateLimit.ReadRPM, Burst: cfg.RateLimit.ReadBurst},
 		Search:       ratelimit.Rule{RPM: cfg.RateLimit.SearchRPM, Burst: cfg.RateLimit.SearchBurst},
 		Export:       ratelimit.Rule{RPM: cfg.RateLimit.ExportRPM, Burst: cfg.RateLimit.ExportBurst},
