@@ -51,31 +51,31 @@ func TestExerciseStore_List_Filters(t *testing.T) {
 		},
 		{
 			name:      "muscle_group filter",
-			filter:    ExerciseFilter{MuscleGroup: "chest"},
+			filter:    ExerciseFilter{MuscleGroup: []string{"chest"}},
 			wantNames: []string{"Bench Press"},
 			wantTotal: 1,
 		},
 		{
 			name:      "equipment filter",
-			filter:    ExerciseFilter{Equipment: "barbell"},
+			filter:    ExerciseFilter{Equipment: []string{"barbell"}},
 			wantNames: []string{"Bench Press", "Squat"},
 			wantTotal: 2,
 		},
 		{
 			name:      "category filter matches all",
-			filter:    ExerciseFilter{Category: "strength"},
+			filter:    ExerciseFilter{Category: []string{"strength"}},
 			wantNames: []string{"Bench Press", "Bicep Curl", "Squat"},
 			wantTotal: 3,
 		},
 		{
 			name:      "mechanic filter",
-			filter:    ExerciseFilter{Mechanic: "isolation"},
+			filter:    ExerciseFilter{Mechanic: []string{"isolation"}},
 			wantNames: []string{"Bicep Curl"},
 			wantTotal: 1,
 		},
 		{
 			name:      "level filter",
-			filter:    ExerciseFilter{Level: "beginner"},
+			filter:    ExerciseFilter{Level: []string{"beginner"}},
 			wantNames: []string{"Bench Press", "Bicep Curl"},
 			wantTotal: 2,
 		},
@@ -93,13 +93,13 @@ func TestExerciseStore_List_Filters(t *testing.T) {
 		},
 		{
 			name:      "combined filters narrow further",
-			filter:    ExerciseFilter{MuscleGroup: "chest", Equipment: "barbell"},
+			filter:    ExerciseFilter{MuscleGroup: []string{"chest"}, Equipment: []string{"barbell"}},
 			wantNames: []string{"Bench Press"},
 			wantTotal: 1,
 		},
 		{
 			name:      "filter matching nothing",
-			filter:    ExerciseFilter{MuscleGroup: "does-not-exist"},
+			filter:    ExerciseFilter{MuscleGroup: []string{"does-not-exist"}},
 			wantNames: nil,
 			wantTotal: 0,
 		},
@@ -533,7 +533,7 @@ func TestList_SearchComposesWithFacetFilters(t *testing.T) {
 	ctx := context.Background()
 	seedSearchCorpus(t, ctx, pool)
 
-	got, total, err := store.Exercises.List(ctx, ExerciseFilter{Q: "press", Equipment: "kettlebells"})
+	got, total, err := store.Exercises.List(ctx, ExerciseFilter{Q: "press", Equipment: []string{"kettlebells"}})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -557,5 +557,108 @@ func TestList_SearchWildcardsRemainLiteralAcrossFacets(t *testing.T) {
 		if total != 0 {
 			t.Errorf("q=%q matched %d rows; wildcards must be literal", q, total)
 		}
+	}
+}
+
+// Values within one filter are OR'd and filters are AND'd — what a faceted
+// picker means by "chest or lats, with a barbell". Before this the fields were
+// single strings, so a repeated parameter was silently reduced to its first
+// value and half the filter vanished without a word.
+func TestList_MultiValueFiltersOrWithinAndAcross(t *testing.T) {
+	store, pool := newTestStore(t)
+	ctx := context.Background()
+	seedSearchCorpus(t, ctx, pool)
+
+	both, total, err := store.Exercises.List(ctx, ExerciseFilter{
+		MuscleGroup: []string{"quadriceps", "chest"},
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if total != 4 {
+		t.Errorf("quadriceps OR chest -> %d (%v), want 4", total, namesOf(both))
+	}
+
+	// AND across dimensions: quads or chest, but only with a barbell.
+	narrowed, narrowTotal, err := store.Exercises.List(ctx, ExerciseFilter{
+		MuscleGroup: []string{"quadriceps", "chest"},
+		Equipment:   []string{"barbell"},
+	})
+	if err != nil {
+		t.Fatalf("list narrowed: %v", err)
+	}
+	if narrowTotal != 3 {
+		t.Errorf("with equipment -> %d (%v), want 3", narrowTotal, namesOf(narrowed))
+	}
+	if narrowTotal >= total {
+		t.Errorf("adding a second filter widened the result: %d >= %d", narrowTotal, total)
+	}
+}
+
+// Blank values must not become a filter for the empty string — a trailing comma
+// or an unset select would otherwise match nothing and look like real data.
+func TestList_BlankFilterValuesAreIgnored(t *testing.T) {
+	store, pool := newTestStore(t)
+	ctx := context.Background()
+	seedSearchCorpus(t, ctx, pool)
+
+	all, total, err := store.Exercises.List(ctx, ExerciseFilter{})
+	if err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	got, gotTotal, err := store.Exercises.List(ctx, ExerciseFilter{MuscleGroup: []string{"", "  "}})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if gotTotal != total {
+		t.Errorf("blank filter changed the result: %d vs %d (%v)", gotTotal, total, namesOf(got))
+	}
+	_ = all
+}
+
+// Refreshing a known set of rows should cost one request for those rows, not the
+// whole catalog. Without this a consumer holding its own copy had to pull the
+// full export and intersect locally.
+func TestList_ByIDsFetchesExactlyThoseRows(t *testing.T) {
+	store, pool := newTestStore(t)
+	ctx := context.Background()
+	seedSearchCorpus(t, ctx, pool)
+
+	all, _, err := store.Exercises.List(ctx, ExerciseFilter{})
+	if err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	want := []string{all[0].ID, all[2].ID}
+
+	got, total, err := store.Exercises.List(ctx, ExerciseFilter{IDs: want})
+	if err != nil {
+		t.Fatalf("list by ids: %v", err)
+	}
+	if total != 2 || len(got) != 2 {
+		t.Fatalf("got %d rows (total %d), want 2 (%v)", len(got), total, namesOf(got))
+	}
+	found := map[string]bool{got[0].ID: true, got[1].ID: true}
+	for _, id := range want {
+		if !found[id] {
+			t.Errorf("id %s missing from the batch", id)
+		}
+	}
+}
+
+// The migration case: anyone moving off free-exercise-db holds its identifiers,
+// and export has always published source_id while nothing could query by it.
+func TestList_BySourceIDs(t *testing.T) {
+	store, pool := newTestStore(t)
+	ctx := context.Background()
+	seedExercise(t, ctx, pool, exerciseFixture{slug: "a", name: "A", sourceID: "Upstream_A"})
+	seedExercise(t, ctx, pool, exerciseFixture{slug: "b", name: "B", sourceID: "Upstream_B"})
+	seedExercise(t, ctx, pool, exerciseFixture{slug: "c", name: "C", sourceID: "Upstream_C"})
+
+	got, total, err := store.Exercises.List(ctx, ExerciseFilter{SourceIDs: []string{"Upstream_A", "Upstream_C"}})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("got %d (%v), want 2", total, namesOf(got))
 	}
 }

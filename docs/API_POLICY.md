@@ -113,6 +113,43 @@ this header yourself — the Fetch spec forbids scripts from overriding `User-Ag
 requests through your own backend and set the header there, the same guidance Open Food Facts
 gives its own browser-based consumers.
 
+## Fetching a known set, and filtering on several values
+
+**Re-read specific rows** with `?ids=` (UUIDs) or `?source_ids=` (upstream
+identifiers), comma-separated or repeated, up to 100 per request:
+
+```
+GET /exercises?ids=3490fcdf-...,7c1b2e44-...
+GET /exercises?source_ids=3_4_Sit-Up,Barbell_Bench_Press
+```
+
+This is what a consumer keeping its own copy should use to refresh it. Before it
+existed the only route was pulling the whole export and intersecting locally — a
+300 KB response to refresh a handful of rows. `source_ids` answers the migration
+case: if you are moving off free-exercise-db you already hold its identifiers, and
+every response has always carried `source_id`.
+
+Prefer this to polling the export. The export is for mirroring the *whole*
+catalog on a schedule; `?ids=` is for refreshing what you actually hold.
+
+**Every taxonomy filter takes several values**, comma-separated or repeated.
+Values within one filter are OR'd, and the filters are AND'd together:
+
+```
+GET /exercises?muscle_group=chest,lats&equipment=barbell
+```
+
+reads as "chest or lats, with a barbell" — the query a faceted picker actually
+means.
+
+> **Behaviour change.** These filters used to accept a single value, and a
+> repeated parameter was silently reduced to its first:
+> `?muscle_group=chest&muscle_group=lats` answered `200` with only the chest rows.
+> If you worked around that by issuing one request per value, you can now send one.
+
+Every value is validated, so a typo is reported wherever it appears rather than
+passing because the first value happened to be spelled right.
+
 ## What search matches
 
 `?q=` is one search box, not a name lookup. Each whitespace-separated word is matched

@@ -53,7 +53,7 @@ func TestListExercises_NoMatchesSerializesAsEmptyArray(t *testing.T) {
 	// primary consumption model docs/DESIGN.md recommends — which is what
 	// made `null` here a client-crashing default rather than a cosmetic wart.
 	out, err := ListExercises(ctx, s, "", &ListExercisesInput{
-		MuscleGroup: "no-such-muscle-group",
+		MuscleGroup: []string{"no-such-muscle-group"},
 		PageParams:  PageParams{Page: 1, PerPage: 50},
 	})
 	if err != nil {
