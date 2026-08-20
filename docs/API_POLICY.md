@@ -142,6 +142,9 @@ GET /exercises?muscle_group=chest,lats&equipment=barbell
 reads as "chest or lats, with a barbell" — the query a faceted picker actually
 means.
 
+Both spellings work and may be mixed — `?muscle_group=chest,lats&muscle_group=quadriceps`
+is three values.
+
 > **Behaviour change.** These filters used to accept a single value, and a
 > repeated parameter was silently reduced to its first:
 > `?muscle_group=chest&muscle_group=lats` answered `200` with only the chest rows.

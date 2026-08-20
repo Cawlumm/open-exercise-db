@@ -13,7 +13,11 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Cawlumm/open-exercise-db/internal/export"
+	"github.com/Cawlumm/open-exercise-db/internal/media"
+	"github.com/Cawlumm/open-exercise-db/internal/ratelimit"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
+	"github.com/danielgtaylor/huma/v2/humatest"
 )
 
 // These tests cover a category the rest of the suite did not: what a caller who
@@ -893,5 +897,76 @@ func TestListExercises_RejectsOversizedIDBatch(t *testing.T) {
 	}
 	if _, err := ListExercises(ctx, s, "", &ListExercisesInput{IDs: ids}); err == nil {
 		t.Fatalf("want a 422 for more than %d ids", maxIDBatch)
+	}
+}
+
+// These go over HTTP rather than calling the handler, which is the whole point.
+// The handler-level tests for multi-value filters passed while production still
+// silently dropped a repeated parameter, because constructing
+// ListExercisesInput{MuscleGroup: []string{"chest","lats"}} in Go skips query
+// binding entirely — the exact layer that was broken. huma offers comma-splitting
+// or repeat-collection but never both, so only a request can prove which one a
+// parameter is in.
+func TestListExercises_BothMultiValueSpellingsOverHTTP(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	seedVocabulary(t, ctx, pool)
+
+	for _, f := range []struct{ slug, name, muscle string }{
+		{"bench-press", "Bench Press", "chest"},
+		{"pull-up", "Pull-Up", "lats"},
+		{"squat", "Squat", "quadriceps"},
+	} {
+		seedExercise(t, ctx, pool, exerciseFixture{
+			slug: f.slug, name: f.name, muscleGroup: f.muscle,
+			equipment: "barbell", category: "strength",
+		})
+	}
+
+	_, hapi := humatest.New(t)
+	limiter := ratelimit.NewLimiter(ratelimit.Config{})
+	t.Cleanup(limiter.Close)
+	cache := export.NewCache(export.DefaultCacheTTL, "")
+	mediaStore, err := media.NewFilesystemStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("media store: %v", err)
+	}
+	Register(hapi, s, cache, limiter, mediaStore, "", AuthConfig{})
+
+	total := func(t *testing.T, query string) int {
+		t.Helper()
+		resp := hapi.Do(http.MethodGet, "/api/v1/exercises?"+query,
+			"User-Agent: oedb-test/1.0 (tests@example.test)")
+		if resp.Code != http.StatusOK {
+			t.Fatalf("query %q -> %d: %s", query, resp.Code, resp.Body)
+		}
+		var body struct {
+			Total int `json:"total"`
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return body.Total
+	}
+
+	one := total(t, "muscle_group=chest")
+	if one != 1 {
+		t.Fatalf("single value -> %d, want 1", one)
+	}
+
+	if got := total(t, "muscle_group=chest,lats"); got != 2 {
+		t.Errorf("comma-separated -> %d, want 2", got)
+	}
+	// The spelling production was still dropping after the multi-value change.
+	if got := total(t, "muscle_group=chest&muscle_group=lats"); got != 2 {
+		t.Errorf("repeated parameter -> %d, want 2 — the second value was dropped", got)
+	}
+	// Mixed, because a client assembling a query from a UI may produce either.
+	if got := total(t, "muscle_group=chest,lats&muscle_group=quadriceps"); got != 3 {
+		t.Errorf("mixed spellings -> %d, want 3", got)
+	}
+	// A trailing comma must not become a filter for the empty string.
+	if got := total(t, "muscle_group=chest,"); got != 1 {
+		t.Errorf("trailing comma -> %d, want 1", got)
 	}
 }

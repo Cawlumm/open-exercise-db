@@ -102,18 +102,18 @@ type ListExercisesInput struct {
 	// its first value: ?muscle_group=chest&muscle_group=lats answered 200 with
 	// only the chest rows. Nothing told the caller half their filter had been
 	// discarded, which is worse than an error.
-	Slug        []string `query:"slug" doc:"Exact match on an exercise's slug — the stable human-readable identifier returned in every response. Repeatable."`
-	MuscleGroup []string `query:"muscle_group" doc:"Taxonomy slug filter; see GET /meta/muscle-groups. Repeatable — several values match any of them."`
-	Equipment   []string `query:"equipment" doc:"Taxonomy slug filter; see GET /meta/equipment. Repeatable — several values match any of them."`
-	Category    []string `query:"category" doc:"Taxonomy slug filter; see GET /meta/categories. Repeatable — several values match any of them."`
-	Mechanic    []string `query:"mechanic" doc:"Taxonomy slug filter: compound or isolation. Repeatable."`
+	Slug        []string `query:"slug,explode" doc:"Exact match on an exercise's slug — the stable human-readable identifier returned in every response. Repeatable."`
+	MuscleGroup []string `query:"muscle_group,explode" doc:"Taxonomy slug filter; see GET /meta/muscle-groups. Repeatable — several values match any of them."`
+	Equipment   []string `query:"equipment,explode" doc:"Taxonomy slug filter; see GET /meta/equipment. Repeatable — several values match any of them."`
+	Category    []string `query:"category,explode" doc:"Taxonomy slug filter; see GET /meta/categories. Repeatable — several values match any of them."`
+	Mechanic    []string `query:"mechanic,explode" doc:"Taxonomy slug filter: compound or isolation. Repeatable."`
 	// "expert", not "advanced" — the seeded vocabulary comes from
 	// free-exercise-db, which uses expert as its top level. This doc said
 	// "advanced" and no such term has ever existed, so /docs and the generated
 	// OpenAPI spec were both telling callers to send a value guaranteed to
 	// match nothing (and, since filter values are now validated, to be
 	// rejected outright).
-	Level []string `query:"level" doc:"Taxonomy slug filter: beginner, intermediate, or expert. Repeatable."`
+	Level []string `query:"level,explode" doc:"Taxonomy slug filter: beginner, intermediate, or expert. Repeatable."`
 
 	// IDs and SourceIDs re-read a known set in one request.
 	//
@@ -123,8 +123,8 @@ type ListExercisesInput struct {
 	// to refresh a handful of exercises. SourceIDs answers the migration case:
 	// anyone moving off free-exercise-db holds its identifiers, and export has
 	// always exposed source_id while nothing could query by it.
-	IDs       []string `query:"ids" doc:"Fetch specific exercises by UUID, comma-separated or repeated. Maximum 100 per request."`
-	SourceIDs []string `query:"source_ids" doc:"Fetch specific exercises by their upstream source identifier, comma-separated or repeated. Maximum 100 per request."`
+	IDs       []string `query:"ids,explode" doc:"Fetch specific exercises by UUID, comma-separated or repeated. Maximum 100 per request."`
+	SourceIDs []string `query:"source_ids,explode" doc:"Fetch specific exercises by their upstream source identifier, comma-separated or repeated. Maximum 100 per request."`
 
 	Locale string `query:"locale" doc:"BCP-47 locale for name/aliases/instructions; falls back to English per-field when untranslated"`
 	PageParams
@@ -320,6 +320,12 @@ func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, inp
 	// exercises.go's ExerciseFilter defers the ceiling back to the huma tag
 	// that a direct call never applies. Every sibling handler already routed
 	// through Normalize; this one silently opted out during the refactor.
+	// ...and split on commas ourselves, because huma gives one form or the
+	// other, never both: with explode off it splits a single value on commas and
+	// ignores repeats; with explode on it collects repeats and treats a comma as
+	// a literal character. Consumers write both, so both have to work.
+	normalizeMultiValues(input)
+
 	if err := validateTaxonomyFilters(ctx, s, input); err != nil {
 		return nil, err
 	}
@@ -635,4 +641,41 @@ func isUUID(s string) bool {
 		}
 	}
 	return true
+}
+
+// normalizeMultiValues expands comma-separated values inside a repeated query
+// parameter, so ?muscle_group=chest,lats and ?muscle_group=chest&muscle_group=lats
+// mean the same thing.
+//
+// This exists because the two spellings are handled by different huma modes and
+// a parameter can only be in one of them. Getting it wrong is not a loud failure:
+// with explode off, a repeated parameter silently kept only its first value, so
+// ?muscle_group=chest&muscle_group=lats answered 200 with the chest rows alone
+// and nothing told the caller half their filter had been dropped.
+func normalizeMultiValues(in *ListExercisesInput) {
+	in.Slug = splitCSV(in.Slug)
+	in.MuscleGroup = splitCSV(in.MuscleGroup)
+	in.Equipment = splitCSV(in.Equipment)
+	in.Category = splitCSV(in.Category)
+	in.Mechanic = splitCSV(in.Mechanic)
+	in.Level = splitCSV(in.Level)
+	in.IDs = splitCSV(in.IDs)
+	in.SourceIDs = splitCSV(in.SourceIDs)
+}
+
+// splitCSV flattens comma-separated entries and drops blanks, so a trailing
+// comma or an unset select never becomes a filter for the empty string.
+func splitCSV(values []string) []string {
+	if len(values) == 0 {
+		return values
+	}
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		for _, part := range strings.Split(v, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				out = append(out, part)
+			}
+		}
+	}
+	return out
 }
