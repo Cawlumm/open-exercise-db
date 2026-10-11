@@ -177,6 +177,40 @@ func TestListExercises_LocaleFallbackSurfacedInResponse(t *testing.T) {
 	}
 }
 
+// The search and the response have to agree on one locale: a Spanish word finds
+// the exercise, and the row that comes back reports the Spanish name it matched.
+// The mixed-case tag proves the handler normalizes once for both.
+func TestListExercises_LocaleSearchesTranslation(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+
+	_, revisionID := seedExercise(t, ctx, pool, exerciseFixture{
+		slug: "squat", name: "Squat",
+		muscleGroup: "quadriceps", equipment: "barbell", category: "strength",
+	})
+	seedTranslation(t, ctx, pool, revisionID, "es", "Sentadilla", nil, nil, "human")
+
+	out, err := ListExercises(ctx, s, "", &ListExercisesInput{Q: "sentadilla", Locale: "ES"})
+	if err != nil {
+		t.Fatalf("ListExercises: unexpected error: %v", err)
+	}
+	if len(out.Body.Exercises) != 1 || out.Body.Total != 1 {
+		t.Fatalf("len(Exercises) = %d, total = %d, want 1 and 1", len(out.Body.Exercises), out.Body.Total)
+	}
+	tr := out.Body.Exercises[0].Translation
+	if tr.RequestedLocale != "es" || tr.NameLocale != "es" || tr.Name != "Sentadilla" {
+		t.Errorf("RequestedLocale/NameLocale/Name = %q/%q/%q, want es/es/Sentadilla", tr.RequestedLocale, tr.NameLocale, tr.Name)
+	}
+
+	none, err := ListExercises(ctx, s, "", &ListExercisesInput{Q: "sentadilla"})
+	if err != nil {
+		t.Fatalf("ListExercises (no locale): unexpected error: %v", err)
+	}
+	if len(none.Body.Exercises) != 0 {
+		t.Errorf("no locale returned %d rows for a Spanish word, want 0", len(none.Body.Exercises))
+	}
+}
+
 func TestGetExercise_LocaleFallback(t *testing.T) {
 	s, pool := newTestStore(t)
 	ctx := context.Background()

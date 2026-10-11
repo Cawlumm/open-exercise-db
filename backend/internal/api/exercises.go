@@ -90,7 +90,7 @@ type ListExercisesInput struct {
 	// parameter and one predicate, so this ceiling is what keeps the new
 	// behaviour as cheap as the old one. store.maxSearchTerms enforces the same
 	// bound again for direct handler calls, which never see this tag.
-	Q string `query:"q" maxLength:"200" doc:"Case-insensitive search over an exercise's name, aliases, muscles, equipment, category, mechanic, force and level. Every whitespace-separated word must match somewhere, in any order, so adding a word narrows the results — 'barbell bench' finds barbell bench presses. Rows matching by name rank above rows matching only by taxonomy. Composes with the filters below rather than replacing them. Maximum 200 characters."`
+	Q string `query:"q" maxLength:"200" doc:"Case-insensitive search over an exercise's name, aliases, muscles, equipment, category, mechanic, force and level. Every whitespace-separated word must match somewhere, in any order, so adding a word narrows the results — 'barbell bench' finds barbell bench presses. Rows matching by name rank above rows matching only by taxonomy. With locale, names and aliases in that locale (and its base language) are searched as well as English. Composes with the filters below rather than replacing them. Maximum 200 characters."`
 	// Every response carries a slug, so a consumer that stored one had no way
 	// to look it back up: the path takes a UUID and there was no slug filter,
 	// leaving only a substring search that could match several rows or none.
@@ -335,8 +335,13 @@ func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, inp
 		return nil, err
 	}
 
+	// Normalized once, so the search predicate, the response and the echoed
+	// requested_locale agree on one spelling.
+	locale := normalizeLocale(input.Locale)
+
 	filter := store.ExerciseFilter{
 		Q:           input.Q,
+		Locale:      locale,
 		Slug:        input.Slug,
 		MuscleGroup: input.MuscleGroup,
 		Equipment:   input.Equipment,
@@ -366,7 +371,7 @@ func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, inp
 	// package.
 	out.Body.Exercises = make([]contract.Exercise, 0, len(exercises))
 	for _, ex := range exercises {
-		resolved, err := resolveExercise(ctx, s, ex, normalizeLocale(input.Locale), imageBaseURL)
+		resolved, err := resolveExercise(ctx, s, ex, locale, imageBaseURL)
 		if err != nil {
 			return nil, mapStoreError(err, "exercise not found")
 		}

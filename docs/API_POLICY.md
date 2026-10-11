@@ -175,6 +175,12 @@ Two things worth knowing:
   and exact — use it. `?q=` is for the case where a person typed something and you do not
   know which dimension they meant.
 
+With `?locale=`, each word also matches the exercise's approved name and aliases in that
+locale and its base language (`es-MX` also searches `es`). English is always searched too,
+so a word can match in either language. Translated-name hits rank with name matches. Only
+translations of the exercise's current revision count, and there is no accent folding:
+`?q=bulgara` will not find "búlgara".
+
 Matching is substring-based against the taxonomy slugs, which is deliberate: nobody types
 `olympic-weightlifting`, so `?q=olympic` finds it. There is no stemming or fuzzy matching —
 `?q=squats` will not find "Squat". Ranking is exact name, then name prefix, then name
