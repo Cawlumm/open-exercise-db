@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -660,5 +661,218 @@ func TestList_BySourceIDs(t *testing.T) {
 	}
 	if total != 2 {
 		t.Fatalf("got %d (%v), want 2", total, namesOf(got))
+	}
+}
+
+// The English path must not change when a locale is merely present: a request
+// with no locale, or with "en", has to produce the SQL and arguments it did
+// before translated search existed. Unlike the database tests around it this
+// one needs no Postgres, so it runs everywhere.
+func TestBuildExerciseWhere_EnglishSQLUnchanged(t *testing.T) {
+	wantWhere := "e.status = 'published' AND " + fmt.Sprintf(termMatchSQL, 1, 1, 1, 1, 1, 1, 1, 1, 1) +
+		" AND " + fmt.Sprintf(termMatchSQL, 2, 2, 2, 2, 2, 2, 2, 2, 2)
+
+	for _, locale := range []string{"", "en"} {
+		where, args, termParams, tr := buildExerciseWhere(ExerciseFilter{Q: "bench press", Locale: locale})
+		if where != wantWhere {
+			t.Errorf("locale %q: where changed:\n%s\nwant:\n%s", locale, where, wantWhere)
+		}
+		if len(args) != 2 || args[0] != "%bench%" || args[1] != "%press%" {
+			t.Errorf("locale %q: args = %v, want only the two term patterns", locale, args)
+		}
+		if tr.active() {
+			t.Errorf("locale %q: translated search must be inactive", locale)
+		}
+
+		orderBy, listArgs := exerciseOrderBy("bench press", append([]any{}, args...), termParams, tr)
+		wantNameTier := fmt.Sprintf(nameOrAliasMatchSQL, 1, 1) + " AND " + fmt.Sprintf(nameOrAliasMatchSQL, 2, 2)
+		if !strings.Contains(orderBy, "WHEN "+wantNameTier+" THEN 2") {
+			t.Errorf("locale %q: name tier changed:\n%s", locale, orderBy)
+		}
+		if strings.Contains(orderBy, "exercise_translations") || len(listArgs) != 4 {
+			t.Errorf("locale %q: order by must not mention translations (args %v)", locale, listArgs)
+		}
+	}
+}
+
+// The locale parameters are bound once, ahead of the term patterns, and only
+// when there is a term to use them: Postgres cannot type a parameter that the
+// statement never references.
+func TestBuildExerciseWhere_TranslatedSearchBindsLocaleOnce(t *testing.T) {
+	where, args, termParams, tr := buildExerciseWhere(ExerciseFilter{Q: "press banco", Locale: "es-MX"})
+	if len(args) != 4 || args[0] != "es-MX" || args[1] != "es" || args[2] != "%press%" || args[3] != "%banco%" {
+		t.Fatalf("args = %v, want [es-MX es %%press%% %%banco%%]", args)
+	}
+	if !tr.active() || tr.locale != 1 || tr.base != 2 {
+		t.Errorf("translatedSearch = %+v, want locale $1 and base $2", tr)
+	}
+	if got := strings.Count(where, "exercise_translations"); got != 2 {
+		t.Errorf("where mentions exercise_translations %d times, want once per term", got)
+	}
+	if len(termParams) != 2 || termParams[0] != 3 || termParams[1] != 4 {
+		t.Errorf("termParams = %v, want [3 4]", termParams)
+	}
+
+	orderBy, _ := exerciseOrderBy("press banco", append([]any{}, args...), termParams, tr)
+	if got := strings.Count(orderBy, "exercise_translations"); got != 2 {
+		t.Errorf("order by mentions exercise_translations %d times, want once per term:\n%s", got, orderBy)
+	}
+
+	_, noTermArgs, _, noTermTr := buildExerciseWhere(ExerciseFilter{Locale: "es"})
+	if len(noTermArgs) != 0 || noTermTr.active() {
+		t.Errorf("no search term: args = %v, active = %v, want neither", noTermArgs, noTermTr.active())
+	}
+}
+
+func TestList_SearchMatchesTranslatedNames(t *testing.T) {
+	store, pool := newTestStore(t)
+	ctx := context.Background()
+
+	_, squatRev := seedExercise(t, ctx, pool, exerciseFixture{slug: "squat", name: "Squat", muscleGroup: "quadriceps", equipment: "barbell", category: "strength"})
+	seedTranslation(t, ctx, pool, squatRev, "es", "Sentadilla", []string{"Sentadilla trasera"}, nil, "human")
+	seedExercise(t, ctx, pool, exerciseFixture{slug: "plank", name: "Plank", muscleGroup: "abdominals", equipment: "body-only", category: "strength"})
+
+	for _, tc := range []struct {
+		name   string
+		q      string
+		locale string
+		want   []string
+	}{
+		{"translated name", "sentadilla", "es", []string{"Squat"}},
+		{"base-language fallback", "sentadilla", "es-MX", []string{"Squat"}},
+		{"translated alias", "trasera", "es", []string{"Squat"}},
+		{"English is always searched", "squat", "es", []string{"Squat"}},
+		{"every word may match in a different language", "sentadilla barbell", "es", []string{"Squat"}},
+		{"no locale is English only", "sentadilla", "", nil},
+		{"en is English only", "sentadilla", "en", nil},
+		{"another locale does not see it", "sentadilla", "fr", nil},
+		{"a region of another language does not see it", "sentadilla", "fr-CA", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, total, err := store.Exercises.List(ctx, ExerciseFilter{Q: tc.q, Locale: tc.locale})
+			if err != nil {
+				t.Fatalf("list: %v", err)
+			}
+			names := namesOf(got)
+			if len(names) != len(tc.want) {
+				t.Fatalf("q=%q locale=%q -> %v, want %v", tc.q, tc.locale, names, tc.want)
+			}
+			for i := range tc.want {
+				if names[i] != tc.want[i] {
+					t.Errorf("q=%q locale=%q -> %v, want %v", tc.q, tc.locale, names, tc.want)
+				}
+			}
+			if total != len(got) {
+				t.Errorf("total = %d, want %d: the count must share the predicate", total, len(got))
+			}
+		})
+	}
+}
+
+// A translation is text about one revision. One that has been retired, or that
+// describes a revision the exercise has since moved past, is not what a reader
+// of that locale is shown, so it must not be what finds the exercise either.
+func TestList_TranslatedSearchIgnoresStaleTranslations(t *testing.T) {
+	store, pool := newTestStore(t)
+	ctx := context.Background()
+
+	_, deadliftRev := seedExercise(t, ctx, pool, exerciseFixture{slug: "deadlift", name: "Deadlift", muscleGroup: "lower-back", equipment: "barbell", category: "powerlifting"})
+	seedTranslation(t, ctx, pool, deadliftRev, "es", "Peso muerto", nil, nil, "human")
+	if _, err := pool.Exec(ctx, `UPDATE exercise_translations SET status = 'superseded' WHERE revision_id = $1`, deadliftRev); err != nil {
+		t.Fatalf("supersede translation: %v", err)
+	}
+
+	curlID, _ := seedExercise(t, ctx, pool, exerciseFixture{slug: "curl", name: "Curl", muscleGroup: "biceps", equipment: "dumbbell", category: "strength"})
+	oldRev := seedRevision(t, ctx, pool, curlID, "Curl", time.Now().Add(-time.Hour), "approved")
+	seedTranslation(t, ctx, pool, oldRev, "es", "Rizo", nil, nil, "human")
+
+	for _, q := range []string{"peso muerto", "rizo"} {
+		got, total, err := store.Exercises.List(ctx, ExerciseFilter{Q: q, Locale: "es"})
+		if err != nil {
+			t.Fatalf("list %q: %v", q, err)
+		}
+		if total != 0 || len(got) != 0 {
+			t.Errorf("q=%q matched %v through a stale translation", q, namesOf(got))
+		}
+	}
+}
+
+// A translated hit is a name match. Without that it would fall to the facet-only
+// tier and lose to rows that merely use a piece of equipment sharing the word.
+func TestList_TranslatedNameMatchesOutrankFacetOnly(t *testing.T) {
+	store, pool := newTestStore(t)
+	ctx := context.Background()
+
+	// "Row" is shorter than "Bench Press", so on length alone it would lead
+	// within a shared tier; only the tier can put the translated hit first.
+	seedExercise(t, ctx, pool, exerciseFixture{slug: "row", name: "Row", muscleGroup: "back", equipment: "banco", category: "strength"})
+	_, benchRev := seedExercise(t, ctx, pool, exerciseFixture{slug: "bench-press", name: "Bench Press", muscleGroup: "chest", equipment: "barbell", category: "strength"})
+	seedTranslation(t, ctx, pool, benchRev, "es", "Press de banco", nil, nil, "human")
+
+	got, _, err := store.Exercises.List(ctx, ExerciseFilter{Q: "banco", Locale: "es"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	names := namesOf(got)
+	if len(names) != 2 || names[0] != "Bench Press" || names[1] != "Row" {
+		t.Errorf("q=banco locale=es -> %v, want [Bench Press Row]", names)
+	}
+}
+
+// LIKE metacharacters in a translated name are as inert as in an English one:
+// q=% must not become a pattern that matches every translated row.
+func TestList_TranslatedSearchKeepsWildcardsLiteral(t *testing.T) {
+	store, pool := newTestStore(t)
+	ctx := context.Background()
+
+	_, squatRev := seedExercise(t, ctx, pool, exerciseFixture{slug: "squat", name: "Squat", muscleGroup: "quadriceps", equipment: "barbell", category: "strength"})
+	seedTranslation(t, ctx, pool, squatRev, "es", "Sentadilla", nil, nil, "human")
+	_, pressRev := seedExercise(t, ctx, pool, exerciseFixture{slug: "press", name: "Press", muscleGroup: "chest", equipment: "barbell", category: "strength"})
+	seedTranslation(t, ctx, pool, pressRev, "es", "100% Press", nil, nil, "human")
+
+	got, total, err := store.Exercises.List(ctx, ExerciseFilter{Q: "%", Locale: "es"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if total != 1 || len(got) != 1 || got[0].CurrentRevision.Name != "Press" {
+		t.Errorf("q=%% locale=es -> %v, want only the name containing a literal percent sign", namesOf(got))
+	}
+}
+
+// Search ignores accents in both directions: a keyboard that skips the
+// diacritic still finds the accented name, and an accented query still finds
+// an unaccented one. It covers English names and translated ones alike.
+func TestList_SearchIgnoresAccents(t *testing.T) {
+	store, pool := newTestStore(t)
+	ctx := context.Background()
+
+	_, extRev := seedExercise(t, ctx, pool, exerciseFixture{slug: "leg-extension", name: "Leg Extension", muscleGroup: "quadriceps", equipment: "machine", category: "strength"})
+	seedTranslation(t, ctx, pool, extRev, "es", "Extensión de pierna", []string{"Máquina de cuádriceps"}, nil, "human")
+	seedExercise(t, ctx, pool, exerciseFixture{slug: "cafe-walk", name: "Café Walk", muscleGroup: "calves", equipment: "body-only", category: "cardio"})
+
+	for _, tc := range []struct {
+		name, q, locale string
+		want            []string
+	}{
+		{"unaccented query, accented translated name", "extension de", "es", []string{"Leg Extension"}},
+		{"accented query, accented translated name", "extensión", "es", []string{"Leg Extension"}},
+		{"unaccented query, accented translated alias", "cuadriceps", "es", []string{"Leg Extension"}},
+		{"unaccented query, accented English name", "cafe", "", []string{"Café Walk"}},
+		{"accented query, unaccented English name", "extensíon", "", []string{"Leg Extension"}},
+		{"accent folding does not widen the match", "extension zzz", "es", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, total, err := store.Exercises.List(ctx, ExerciseFilter{Q: tc.q, Locale: tc.locale})
+			if err != nil {
+				t.Fatalf("list: %v", err)
+			}
+			names := namesOf(got)
+			if len(names) != len(tc.want) || (len(tc.want) > 0 && names[0] != tc.want[0]) {
+				t.Fatalf("q=%q locale=%q -> %v, want %v", tc.q, tc.locale, names, tc.want)
+			}
+			if total != len(got) {
+				t.Errorf("total = %d, want %d", total, len(got))
+			}
+		})
 	}
 }

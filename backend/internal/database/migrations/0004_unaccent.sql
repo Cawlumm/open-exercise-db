@@ -1,0 +1,12 @@
+-- Accent-insensitive search.
+--
+-- Exercise search matches names and aliases with ILIKE, which folds case but not
+-- accents, so "extension" did not find "Extensión" and "sentadilla" would not
+-- have found "Sentadilla" typed on a keyboard that skips the diacritic. Phone
+-- keyboards skip them constantly; Open Food Facts' search folds them for the
+-- same reason. The store compares unaccent(column) with unaccent(pattern).
+--
+-- unaccent is a trusted extension (Postgres 13+), so the database owner can
+-- create it without superuser rights, and it ships in the contrib set of the
+-- stock and Alpine images and of the managed services.
+CREATE EXTENSION IF NOT EXISTS unaccent;

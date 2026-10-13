@@ -32,6 +32,11 @@ type ExerciseFilter struct {
 	// values — so adding a word narrows the search. Name matches rank above
 	// rows that qualified only through a facet; see termMatchSQL.
 	Q string
+	// Locale is a canonical BCP-47 tag (the API normalizes it). A non-English
+	// value makes Q also match the approved translations, in that locale and its
+	// base language, of an exercise's current revision; English is always
+	// searched. Empty or "en" leaves the query exactly as it was.
+	Locale string
 	// Slug is an exact match on the human-readable identifier. Every response
 	// carries a slug, so a consumer that stored one previously had no way to
 	// look it back up: the path takes a UUID and there was no slug filter, so
@@ -82,7 +87,7 @@ const exerciseRevisionColumns = `
 // filtered per ExerciseFilter, alongside the total matching row count
 // (ignoring pagination) for the response envelope.
 func (s *ExerciseStore) List(ctx context.Context, filter ExerciseFilter) ([]model.Exercise, int, error) {
-	where, args, termParams := buildExerciseWhere(filter)
+	where, args, termParams, tr := buildExerciseWhere(filter)
 
 	total, err := s.countWhere(ctx, where, args)
 	if err != nil {
@@ -100,7 +105,7 @@ func (s *ExerciseStore) List(ctx context.Context, filter ExerciseFilter) ([]mode
 	offset := (page - 1) * perPage
 
 	listArgs := append(append([]any{}, args...), perPage, offset)
-	orderBy, listArgs := exerciseOrderBy(filter.Q, listArgs, termParams)
+	orderBy, listArgs := exerciseOrderBy(filter.Q, listArgs, termParams, tr)
 	query := fmt.Sprintf(`
 		SELECT %s
 		FROM exercises e
@@ -302,8 +307,9 @@ func (s *ExerciseStore) countWhere(ctx context.Context, where string, args []any
 // unpublished is visible through this store method.
 // buildExerciseWhere also reports the positional parameters holding each search
 // term's LIKE pattern, so the ORDER BY can reuse them to tell a name match from
-// a facet-only one without binding the same patterns a second time.
-func buildExerciseWhere(filter ExerciseFilter) (string, []any, []int) {
+// a facet-only one without binding the same patterns a second time. The same
+// goes for the locale pair a translated-name search binds.
+func buildExerciseWhere(filter ExerciseFilter) (string, []any, []int, translatedSearch) {
 	conditions := []string{"e.status = 'published'"}
 	var args []any
 	var termParams []int
@@ -339,7 +345,15 @@ func buildExerciseWhere(filter ExerciseFilter) (string, []any, []int) {
 	// AND across terms rather than OR: adding a word should narrow a search,
 	// which is the universal convention and the only one that makes a
 	// type-ahead usable as the user keeps typing.
-	for _, term := range searchTerms(filter.Q) {
+	terms := searchTerms(filter.Q)
+	// Bound only when there is a term to use them: Postgres cannot type a
+	// parameter the statement never references.
+	var tr translatedSearch
+	if len(terms) > 0 && filter.Locale != "" && filter.Locale != "en" {
+		args = append(args, filter.Locale, baseLanguage(filter.Locale))
+		tr = translatedSearch{locale: len(args) - 1, base: len(args)}
+	}
+	for _, term := range terms {
 		// The term is escaped before being wrapped in wildcards, and the
 		// pattern declares its escape character explicitly. Without this, LIKE
 		// metacharacters in user input were live: `?q=%` built `%%%`, which
@@ -350,7 +364,11 @@ func buildExerciseWhere(filter ExerciseFilter) (string, []any, []int) {
 		args = append(args, "%"+escapeLikePattern(term)+"%")
 		n := len(args)
 		termParams = append(termParams, n)
-		conditions = append(conditions, fmt.Sprintf(termMatchSQL, n, n, n, n, n, n, n, n, n))
+		match := fmt.Sprintf(termMatchSQL, n, n, n, n, n, n, n, n, n)
+		if tr.active() {
+			match = "(" + match + " OR " + tr.matchSQL(n) + ")"
+		}
+		conditions = append(conditions, match)
 	}
 	addIn("e.slug", filter.Slug)
 	addIn("r.muscle_group", filter.MuscleGroup)
@@ -369,8 +387,39 @@ func buildExerciseWhere(filter ExerciseFilter) (string, []any, []int) {
 		conditions = append(conditions, fmt.Sprintf("e.id = ANY($%d::uuid[])", len(args)))
 	}
 
-	return strings.Join(conditions, " AND "), args, termParams
+	return strings.Join(conditions, " AND "), args, termParams, tr
 }
+
+// translatedSearch holds the positions of the two locale parameters (the
+// requested locale and its base language, which are equal when there is no
+// region) that a translated-name search binds. The zero value means the search
+// is English-only.
+type translatedSearch struct{ locale, base int }
+
+func (t translatedSearch) active() bool { return t.locale != 0 }
+
+// matchSQL is the translated half of a name match for the search word whose
+// pattern is parameter n.
+//
+// Only approved translations of the current revision count: a superseded one is
+// retired text, and one attached to an older revision describes a name the
+// exercise no longer has. Matching on the base language as well as the exact
+// locale is the same fallback the response applies, so a search for es-MX finds
+// what an es-MX reader would be shown.
+func (t translatedSearch) matchSQL(n int) string {
+	return fmt.Sprintf(translatedNameMatchSQL, t.locale, t.base, n, n)
+}
+
+// translatedNameMatchSQL is nameOrAliasMatchSQL for a row's translated name and
+// aliases. It is OR'd into the name arm only, so a translated hit ranks as a
+// name match rather than as a facet-only one.
+const translatedNameMatchSQL = `EXISTS (
+	SELECT 1 FROM exercise_translations t
+	WHERE t.revision_id = r.id AND t.status = 'approved'
+	AND t.locale IN ($%d, $%d)
+	AND (unaccent(t.name) ILIKE unaccent($%d) ESCAPE '\'
+		OR EXISTS (SELECT 1 FROM unnest(t.aliases) AS ta WHERE unaccent(ta) ILIKE unaccent($%d) ESCAPE '\'))
+)`
 
 // termMatchSQL is what one search word has to match for a row to qualify.
 //
@@ -401,8 +450,8 @@ func buildExerciseWhere(filter ExerciseFilter) (string, []any, []int) {
 // (pg_trgm + GIN) are the natural next step rather than full-text search, for
 // the locale reasons exerciseOrderBy already documents.
 const termMatchSQL = `(
-	r.name ILIKE $%d ESCAPE '\'
-	OR EXISTS (SELECT 1 FROM unnest(r.aliases) AS alias WHERE alias ILIKE $%d ESCAPE '\')
+	unaccent(r.name) ILIKE unaccent($%d) ESCAPE '\'
+	OR EXISTS (SELECT 1 FROM unnest(r.aliases) AS alias WHERE unaccent(alias) ILIKE unaccent($%d) ESCAPE '\')
 	OR EXISTS (SELECT 1 FROM unnest(r.secondary_muscles) AS sm WHERE sm ILIKE $%d ESCAPE '\')
 	OR r.muscle_group ILIKE $%d ESCAPE '\'
 	OR r.equipment ILIKE $%d ESCAPE '\'
@@ -417,8 +466,8 @@ const termMatchSQL = `(
 // from "this row merely uses that equipment", reusing the parameters the WHERE
 // clause already bound.
 const nameOrAliasMatchSQL = `(
-	r.name ILIKE $%d ESCAPE '\'
-	OR EXISTS (SELECT 1 FROM unnest(r.aliases) AS alias WHERE alias ILIKE $%d ESCAPE '\')
+	unaccent(r.name) ILIKE unaccent($%d) ESCAPE '\'
+	OR EXISTS (SELECT 1 FROM unnest(r.aliases) AS alias WHERE unaccent(alias) ILIKE unaccent($%d) ESCAPE '\')
 )`
 
 // exerciseOrderBy returns the ORDER BY clause for a list query, plus the args
@@ -450,7 +499,7 @@ const nameOrAliasMatchSQL = `(
 // separation is what keeps the facet search from drowning the obvious answer —
 // `q=press` matches every row whose category is powerlifting, and without a tier
 // between them "Bench Press" would compete with those on name length alone.
-func exerciseOrderBy(q string, listArgs []any, termParams []int) (string, []any) {
+func exerciseOrderBy(q string, listArgs []any, termParams []int, tr translatedSearch) (string, []any) {
 	q = strings.TrimSpace(q)
 	if q == "" {
 		return "r.name ASC, e.id ASC", listArgs
@@ -476,7 +525,11 @@ func exerciseOrderBy(q string, listArgs []any, termParams []int) (string, []any)
 	if len(termParams) > 0 {
 		parts := make([]string, 0, len(termParams))
 		for _, n := range termParams {
-			parts = append(parts, fmt.Sprintf(nameOrAliasMatchSQL, n, n))
+			part := fmt.Sprintf(nameOrAliasMatchSQL, n, n)
+			if tr.active() {
+				part = "(" + part + " OR " + tr.matchSQL(n) + ")"
+			}
+			parts = append(parts, part)
 		}
 		nameTier = strings.Join(parts, " AND ")
 	}
