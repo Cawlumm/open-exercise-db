@@ -2,7 +2,9 @@ package api
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/danielgtaylor/huma/v2"
 )
@@ -27,9 +29,14 @@ import (
 // is the same class of confidently-wrong answer as the unescaped LIKE wildcards
 // this was found alongside.
 
-// rejectNulBytesMiddleware answers 422 for any request whose query string
-// contains a NUL byte.
-func rejectNulBytesMiddleware(hapi huma.API) func(huma.Context, func(huma.Context)) {
+// The same holds for bytes that are not UTF-8: Postgres rejects them as an
+// "invalid byte sequence" at execution, so `?q=extensi%F3n` (a Latin-1 ó, which
+// a client with the wrong encoding sends) reached the database and came back as
+// the same misleading 500.
+
+// rejectBadTextMiddleware answers 422 for any request whose query string
+// contains a NUL byte or a value that is not valid UTF-8.
+func rejectBadTextMiddleware(hapi huma.API) func(huma.Context, func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
 		u := ctx.URL()
 		// RawQuery, not the parsed values: a NUL can arrive percent-encoded
@@ -41,6 +48,31 @@ func rejectNulBytesMiddleware(hapi huma.API) func(huma.Context, func(huma.Contex
 				"query string contains a NUL byte (U+0000), which cannot appear in a text value")
 			return
 		}
+		if !validQueryText(u.RawQuery) {
+			huma.WriteErr(hapi, ctx, http.StatusUnprocessableEntity,
+				"query string is not valid UTF-8; percent-encode text as UTF-8")
+			return
+		}
 		next(ctx)
 	}
+}
+
+// validQueryText reports whether every decoded key and value is valid UTF-8.
+// A query that does not parse is left for huma to reject.
+func validQueryText(rawQuery string) bool {
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return true
+	}
+	for k, vs := range values {
+		if !utf8.ValidString(k) {
+			return false
+		}
+		for _, v := range vs {
+			if !utf8.ValidString(v) {
+				return false
+			}
+		}
+	}
+	return true
 }

@@ -51,7 +51,7 @@ const cacheControl = "public, max-age=300, stale-while-revalidate=86400"
 // and User-Agent policy apply uniformly to every GET this package exposes,
 // not opted into per-route.
 func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter *ratelimit.Limiter, mediaStore media.Store, imageBaseURL string, authCfg AuthConfig) {
-	// Rate limiting first. Putting the NUL check ahead of it looked like a
+	// Rate limiting first. Putting the NUL and encoding check ahead of it looked like a
 	// courtesy — reject malformed input without spending the caller's budget —
 	// but it created an unmetered request path: a client looping on
 	// NUL-containing query strings was rejected before the limiter ever saw it,
@@ -59,7 +59,7 @@ func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter 
 	// that one error response, making it the only 4xx a well-behaved consumer
 	// could not read its remaining budget from.
 	hapi.UseMiddleware(floodGuardMiddleware(hapi, limiter))
-	hapi.UseMiddleware(rejectNulBytesMiddleware(hapi))
+	hapi.UseMiddleware(rejectBadTextMiddleware(hapi))
 
 	// App authentication runs after rate limiting, deliberately. An
 	// unauthenticated flood should be rejected by the limiter without ever
