@@ -417,8 +417,8 @@ const translatedNameMatchSQL = `EXISTS (
 	SELECT 1 FROM exercise_translations t
 	WHERE t.revision_id = r.id AND t.status = 'approved'
 	AND t.locale IN ($%d, $%d)
-	AND (t.name ILIKE $%d ESCAPE '\'
-		OR EXISTS (SELECT 1 FROM unnest(t.aliases) AS ta WHERE ta ILIKE $%d ESCAPE '\'))
+	AND (unaccent(t.name) ILIKE unaccent($%d) ESCAPE '\'
+		OR EXISTS (SELECT 1 FROM unnest(t.aliases) AS ta WHERE unaccent(ta) ILIKE unaccent($%d) ESCAPE '\'))
 )`
 
 // termMatchSQL is what one search word has to match for a row to qualify.
@@ -450,8 +450,8 @@ const translatedNameMatchSQL = `EXISTS (
 // (pg_trgm + GIN) are the natural next step rather than full-text search, for
 // the locale reasons exerciseOrderBy already documents.
 const termMatchSQL = `(
-	r.name ILIKE $%d ESCAPE '\'
-	OR EXISTS (SELECT 1 FROM unnest(r.aliases) AS alias WHERE alias ILIKE $%d ESCAPE '\')
+	unaccent(r.name) ILIKE unaccent($%d) ESCAPE '\'
+	OR EXISTS (SELECT 1 FROM unnest(r.aliases) AS alias WHERE unaccent(alias) ILIKE unaccent($%d) ESCAPE '\')
 	OR EXISTS (SELECT 1 FROM unnest(r.secondary_muscles) AS sm WHERE sm ILIKE $%d ESCAPE '\')
 	OR r.muscle_group ILIKE $%d ESCAPE '\'
 	OR r.equipment ILIKE $%d ESCAPE '\'
@@ -466,8 +466,8 @@ const termMatchSQL = `(
 // from "this row merely uses that equipment", reusing the parameters the WHERE
 // clause already bound.
 const nameOrAliasMatchSQL = `(
-	r.name ILIKE $%d ESCAPE '\'
-	OR EXISTS (SELECT 1 FROM unnest(r.aliases) AS alias WHERE alias ILIKE $%d ESCAPE '\')
+	unaccent(r.name) ILIKE unaccent($%d) ESCAPE '\'
+	OR EXISTS (SELECT 1 FROM unnest(r.aliases) AS alias WHERE unaccent(alias) ILIKE unaccent($%d) ESCAPE '\')
 )`
 
 // exerciseOrderBy returns the ORDER BY clause for a list query, plus the args

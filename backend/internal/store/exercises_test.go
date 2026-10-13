@@ -838,3 +838,41 @@ func TestList_TranslatedSearchKeepsWildcardsLiteral(t *testing.T) {
 		t.Errorf("q=%% locale=es -> %v, want only the name containing a literal percent sign", namesOf(got))
 	}
 }
+
+// Search ignores accents in both directions: a keyboard that skips the
+// diacritic still finds the accented name, and an accented query still finds
+// an unaccented one. It covers English names and translated ones alike.
+func TestList_SearchIgnoresAccents(t *testing.T) {
+	store, pool := newTestStore(t)
+	ctx := context.Background()
+
+	_, extRev := seedExercise(t, ctx, pool, exerciseFixture{slug: "leg-extension", name: "Leg Extension", muscleGroup: "quadriceps", equipment: "machine", category: "strength"})
+	seedTranslation(t, ctx, pool, extRev, "es", "Extensión de pierna", []string{"Máquina de cuádriceps"}, nil, "human")
+	seedExercise(t, ctx, pool, exerciseFixture{slug: "cafe-walk", name: "Café Walk", muscleGroup: "calves", equipment: "body-only", category: "cardio"})
+
+	for _, tc := range []struct {
+		name, q, locale string
+		want            []string
+	}{
+		{"unaccented query, accented translated name", "extension de", "es", []string{"Leg Extension"}},
+		{"accented query, accented translated name", "extensión", "es", []string{"Leg Extension"}},
+		{"unaccented query, accented translated alias", "cuadriceps", "es", []string{"Leg Extension"}},
+		{"unaccented query, accented English name", "cafe", "", []string{"Café Walk"}},
+		{"accented query, unaccented English name", "extensíon", "", []string{"Leg Extension"}},
+		{"accent folding does not widen the match", "extension zzz", "es", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, total, err := store.Exercises.List(ctx, ExerciseFilter{Q: tc.q, Locale: tc.locale})
+			if err != nil {
+				t.Fatalf("list: %v", err)
+			}
+			names := namesOf(got)
+			if len(names) != len(tc.want) || (len(tc.want) > 0 && names[0] != tc.want[0]) {
+				t.Fatalf("q=%q locale=%q -> %v, want %v", tc.q, tc.locale, names, tc.want)
+			}
+			if total != len(got) {
+				t.Errorf("total = %d, want %d", total, len(got))
+			}
+		})
+	}
+}

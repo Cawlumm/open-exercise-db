@@ -33,6 +33,9 @@ column backfilled first. Two `CHECK`s replace the guarantee that `NOT NULL`
 was carrying: exactly one attribution per row, and `app_user_ref` only
 alongside an app.
 
+`0004_unaccent.sql` enables the `unaccent` extension, which exercise search uses to match names
+and aliases regardless of accents (`extension` finds `Extensión`). It changes no tables.
+
 ## Migrations run against a lock, and can run concurrently
 
 `Migrate` holds a Postgres advisory lock across the whole check-and-apply, so
