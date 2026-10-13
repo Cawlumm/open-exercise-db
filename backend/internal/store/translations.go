@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -172,4 +173,148 @@ func baseLanguage(locale string) string {
 		return locale[:i]
 	}
 	return locale
+}
+
+// MachineTranslation is one exercise's draft translation, keyed by the stable
+// source_id rather than a database id so one file imports into any deployment.
+// EnglishName is the name the translation was written against; it is what lets
+// an import notice that the exercise has since been edited.
+type MachineTranslation struct {
+	SourceID     string   `json:"source_id"`
+	EnglishName  string   `json:"en_name"`
+	Name         string   `json:"name"`
+	Aliases      []string `json:"aliases"`
+	Instructions []string `json:"instructions"`
+}
+
+// MachineImportResult counts what ImportMachine did with each item.
+type MachineImportResult struct {
+	Inserted   int
+	Replaced   int // a previous machine draft for the revision was superseded
+	Unchanged  int
+	KeptHuman  int
+	Stale      int // English name no longer matches: the exercise was edited
+	Mismatched int // instruction step count differs from the English source
+	NotFound   int
+}
+
+// ImportMachine writes items as origin='machine' translations of each
+// exercise's current revision, in one transaction. It never overwrites a human
+// translation, supersedes (rather than deletes) an older machine draft, and
+// skips an item whose English name or step count no longer matches the
+// revision, since a draft of text that has changed is wrong, not merely old.
+// With dryRun the transaction is rolled back after counting.
+func (s *TranslationStore) ImportMachine(ctx context.Context, locale string, items []MachineTranslation, dryRun bool) (MachineImportResult, error) {
+	var res MachineImportResult
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return res, fmt.Errorf("begin import tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op once committed
+
+	for _, it := range items {
+		if strings.TrimSpace(it.Name) == "" {
+			return res, fmt.Errorf("%s: translation has an empty name", it.SourceID)
+		}
+		var revisionID, name string
+		var instructions []byte
+		err := tx.QueryRow(ctx, `
+			SELECT r.id, r.name, r.instructions
+			FROM exercises e JOIN exercise_revisions r ON r.id = e.current_revision_id
+			WHERE e.source_id = $1 AND e.status = 'published'`, it.SourceID,
+		).Scan(&revisionID, &name, &instructions)
+		if errors.Is(err, pgx.ErrNoRows) {
+			res.NotFound++
+			continue
+		}
+		if err != nil {
+			return res, fmt.Errorf("%s: load current revision: %w", it.SourceID, err)
+		}
+		if name != it.EnglishName {
+			res.Stale++
+			continue
+		}
+		var steps []string
+		if err := json.Unmarshal(instructions, &steps); err != nil {
+			return res, fmt.Errorf("%s: decode English instructions: %w", it.SourceID, err)
+		}
+		if len(steps) != len(it.Instructions) {
+			res.Mismatched++
+			continue
+		}
+
+		encoded, err := json.Marshal(it.Instructions)
+		if err != nil {
+			return res, fmt.Errorf("%s: encode instructions: %w", it.SourceID, err)
+		}
+		aliases := it.Aliases
+		if aliases == nil {
+			aliases = []string{}
+		}
+
+		var origin, oldName string
+		var oldAliases []string
+		var oldInstr []byte
+		err = tx.QueryRow(ctx, `
+			SELECT origin, name, aliases, instructions FROM exercise_translations
+			WHERE revision_id = $1 AND locale = $2 AND status = 'approved'`, revisionID, locale,
+		).Scan(&origin, &oldName, &oldAliases, &oldInstr)
+		replacing := false
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+		case err != nil:
+			return res, fmt.Errorf("%s: load existing translation: %w", it.SourceID, err)
+		case origin == "human":
+			res.KeptHuman++
+			continue
+		default:
+			var old []string
+			_ = json.Unmarshal(oldInstr, &old)
+			if oldName == it.Name && equalStrings(oldAliases, aliases) && equalStrings(old, it.Instructions) {
+				res.Unchanged++
+				continue
+			}
+			replacing = true
+		}
+
+		if replacing {
+			if _, err := tx.Exec(ctx, `
+				UPDATE exercise_translations SET status = 'superseded'
+				WHERE revision_id = $1 AND locale = $2 AND status = 'approved'`, revisionID, locale); err != nil {
+				return res, fmt.Errorf("%s: supersede machine draft: %w", it.SourceID, err)
+			}
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO exercise_translations
+				(revision_id, locale, name, aliases, instructions, translated_by, origin, status)
+			VALUES ($1, $2, $3, $4, $5, NULL, 'machine', 'approved')`,
+			revisionID, locale, it.Name, aliases, encoded); err != nil {
+			return res, fmt.Errorf("%s: insert machine translation: %w", it.SourceID, err)
+		}
+		if replacing {
+			res.Replaced++
+		} else {
+			res.Inserted++
+		}
+	}
+
+	if dryRun {
+		return res, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return res, fmt.Errorf("commit import: %w", err)
+	}
+	return res, nil
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
