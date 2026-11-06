@@ -125,3 +125,52 @@ func TestExportCache_RejectionDoesNotAppear(t *testing.T) {
 		t.Error("a rejected submission appeared in the export")
 	}
 }
+
+// GET /exercises is cached by the same rule as the export: every write that
+// publishes must clear it, or a client asking the same question gets the
+// pre-publish answer for up to a day.
+func TestListCache_PublishingRefreshesTheList(t *testing.T) {
+	_, _, api, adminToken, appToken := newModerationAPI(t)
+	list := func(query string) string {
+		resp := api.Get("/api/v1/exercises?"+query, "User-Agent: "+testUA)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("list %s = %d: %s", query, resp.Code, resp.Body.String())
+		}
+		return resp.Body.String()
+	}
+
+	createID := submitAs(t, api, appToken, `{"type":"create","payload":{"name":"List Cache Probe","muscle_group":"abdominals","category":"strength","equipment":"cable","instructions":["First."]}}`)
+	if strings.Contains(list("q=list+cache+probe"), "List Cache Probe") {
+		t.Fatal("a pending submission appeared in the list")
+	}
+	_, body := postJSON(t, api, "/api/v1/admin/submissions/"+createID+"/approve", adminToken, `{}`)
+	var first struct {
+		ExerciseID string `json:"exercise_id"`
+		RevisionID string `json:"revision_id"`
+	}
+	if err := json.Unmarshal([]byte(body), &first); err != nil {
+		t.Fatalf("decode %s: %v", body, err)
+	}
+	if !strings.Contains(list("q=list+cache+probe"), "List Cache Probe") {
+		t.Fatal("approve: the cached empty search was served after publishing")
+	}
+
+	byID := "ids=" + first.ExerciseID
+	list(byID) // warm
+	editID := submitAs(t, api, appToken, fmt.Sprintf(
+		`{"type":"edit","target_exercise_id":%q,"payload":{"name":"List Cache Renamed","muscle_group":"abdominals","category":"strength","equipment":"cable","instructions":["Second."]}}`, first.ExerciseID))
+	if code, resp := postJSON(t, api, "/api/v1/admin/submissions/bulk", adminToken,
+		fmt.Sprintf(`{"action":"approve","ids":[%q]}`, editID)); code != http.StatusOK {
+		t.Fatalf("bulk = %d: %s", code, resp)
+	}
+	if !strings.Contains(list(byID), "List Cache Renamed") {
+		t.Fatal("bulk approve: the list still served the pre-edit name")
+	}
+
+	if code, b := postJSON(t, api, "/api/v1/admin/exercises/"+first.ExerciseID+"/revert/"+first.RevisionID, adminToken, `{}`); code != http.StatusOK {
+		t.Fatalf("revert = %d: %s", code, b)
+	}
+	if got := list(byID); strings.Contains(got, "List Cache Renamed") || !strings.Contains(got, "List Cache Probe") {
+		t.Fatal("revert: the list still served the reverted name")
+	}
+}

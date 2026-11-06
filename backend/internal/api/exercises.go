@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -200,7 +201,7 @@ type ListExerciseTranslationsOutput struct {
 // internal/config.Config.ImageBaseURL, threaded down from Register (api.go)
 // so ListExercises/GetExercise can resolve contract.Exercise.Images[].url —
 // see internal/media.ImageURL for what it controls.
-func registerExerciseRoutes(hapi huma.API, s *store.Store, imageBaseURL string) {
+func registerExerciseRoutes(hapi huma.API, s *store.Store, imageBaseURL string, cache *listCache) {
 	huma.Register(hapi, huma.Operation{
 		OperationID: "list-exercises",
 		Method:      http.MethodGet,
@@ -227,7 +228,7 @@ func registerExerciseRoutes(hapi huma.API, s *store.Store, imageBaseURL string) 
 		// malformed image id from a 422 into a 500.
 		RejectUnknownQueryParameters: true,
 	}, func(ctx context.Context, input *ListExercisesInput) (*ListExercisesOutput, error) {
-		return ListExercises(ctx, s, imageBaseURL, input)
+		return listExercises(ctx, s, imageBaseURL, cache, input)
 	})
 
 	huma.Register(hapi, huma.Operation{
@@ -311,6 +312,12 @@ func registerExerciseRoutes(hapi huma.API, s *store.Store, imageBaseURL string) 
 // input struct, per docs/CONVENTIONS.md section 3/6 — no HTTP round trip
 // needed for logic assertions.
 func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, input *ListExercisesInput) (*ListExercisesOutput, error) {
+	return listExercises(ctx, s, imageBaseURL, nil, input)
+}
+
+// listExercises is ListExercises with an optional response cache. The
+// registered operation passes one; direct calls pass nil and always build.
+func listExercises(ctx context.Context, s *store.Store, imageBaseURL string, cache *listCache, input *ListExercisesInput) (*ListExercisesOutput, error) {
 	// Normalized rather than passed through raw. This was the one collection
 	// handler still handing the store its unclamped input while reporting the
 	// clamped values back through paginationFor — so a direct call (the
@@ -325,15 +332,7 @@ func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, inp
 	// ignores repeats; with explode on it collects repeats and treats a comma as
 	// a literal character. Consumers write both, so both have to work.
 	normalizeMultiValues(input)
-
-	if err := validateTaxonomyFilters(ctx, s, input); err != nil {
-		return nil, err
-	}
-
 	page, perPage := input.Normalize()
-	if err := validateIDBatch(input); err != nil {
-		return nil, err
-	}
 
 	// Normalized once, so the search predicate, the response and the echoed
 	// requested_locale agree on one spelling.
@@ -354,6 +353,40 @@ func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, inp
 		PerPage:     perPage,
 	}
 
+	build := func(ctx context.Context) (*listEntry, error) {
+		return buildExerciseList(ctx, s, imageBaseURL, input, filter)
+	}
+	var entry *listEntry
+	var err error
+	if cache != nil {
+		entry, err = cache.get(ctx, listCacheKey(filter), build)
+	} else {
+		entry, err = build(ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if notModified := checkNotModified(&input.Params, entry.tag, cacheControl); notModified != nil {
+		return nil, notModified
+	}
+	out := entry.out
+	return &out, nil
+}
+
+// buildExerciseList validates the filter against the database and assembles
+// one complete 200 response. Validation lives here, behind the cache, because
+// it queries taxonomy: a cached response is only ever stored for a request
+// that passed it, and an invalid one is never stored, so a hit needs no
+// second check.
+func buildExerciseList(ctx context.Context, s *store.Store, imageBaseURL string, input *ListExercisesInput, filter store.ExerciseFilter) (*listEntry, error) {
+	if err := validateTaxonomyFilters(ctx, s, input); err != nil {
+		return nil, err
+	}
+	if err := validateIDBatch(input); err != nil {
+		return nil, err
+	}
+
 	exercises, total, err := s.Exercises.List(ctx, filter)
 	if err != nil {
 		return nil, mapStoreError(err, "")
@@ -371,20 +404,23 @@ func ListExercises(ctx context.Context, s *store.Store, imageBaseURL string, inp
 	// package.
 	out.Body.Exercises = make([]contract.Exercise, 0, len(exercises))
 	for _, ex := range exercises {
-		resolved, err := resolveExercise(ctx, s, ex, locale, imageBaseURL)
+		resolved, err := resolveExercise(ctx, s, ex, filter.Locale, imageBaseURL)
 		if err != nil {
 			return nil, mapStoreError(err, "exercise not found")
 		}
 		out.Body.Exercises = append(out.Body.Exercises, resolved)
 	}
 
-	tag := etagValue(out.Body)
-	if notModified := checkNotModified(&input.Params, tag, cacheControl); notModified != nil {
-		return nil, notModified
+	// Marshaled once for both the ETag and the cache's byte accounting; the
+	// tag is the same hash etagValue would compute from out.Body.
+	b, err := json.Marshal(out.Body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal exercise list: %w", err)
 	}
+	tag := etagValueBytes(b)
 	out.CacheControl = cacheControl
 	out.ETag = etagHeader(tag)
-	return out, nil
+	return &listEntry{out: *out, tag: tag, size: len(b)}, nil
 }
 
 func GetExercise(ctx context.Context, s *store.Store, imageBaseURL string, input *GetExerciseInput) (*GetExerciseOutput, error) {

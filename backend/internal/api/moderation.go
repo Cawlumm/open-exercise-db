@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Cawlumm/open-exercise-db/internal/contract"
-	"github.com/Cawlumm/open-exercise-db/internal/export"
 	"github.com/Cawlumm/open-exercise-db/internal/model"
 	"github.com/Cawlumm/open-exercise-db/internal/ratelimit"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
@@ -146,7 +145,11 @@ type RevertOutput struct {
 	}
 }
 
-func registerModerationRoutes(hapi huma.API, s *store.Store, exportCache *export.Cache) {
+// registerModerationRoutes wires the moderation queue. invalidatePublished
+// clears every in-process cache of published data (the export blob and the
+// list-exercises responses); it is called after each write that changes what
+// the public read endpoints return.
+func registerModerationRoutes(hapi huma.API, s *store.Store, invalidatePublished func()) {
 	huma.Register(hapi, huma.Operation{
 		OperationID: "list-submission-queue",
 		Method:      http.MethodGet,
@@ -240,12 +243,12 @@ func registerModerationRoutes(hapi huma.API, s *store.Store, exportCache *export
 		}
 
 		// Approval is the only thing that changes published data, so it is
-		// the only thing that has to tell the export cache. Without this
-		// /exercises/export keeps serving the pre-approval dataset for up to
-		// DefaultCacheTTL — and mirrors, which consume the dump precisely so
-		// they need not poll, take that stale copy as authoritative and have
-		// no way to know a newer one exists.
-		exportCache.Invalidate()
+		// the only thing that has to tell the caches. Without this
+		// /exercises/export and /exercises keep serving the pre-approval
+		// dataset for up to export.DefaultCacheTTL — and mirrors, which consume
+		// the dump precisely so they need not poll, take that stale copy as
+		// authoritative and have no way to know a newer one exists.
+		invalidatePublished()
 
 		out := &ApproveOutput{}
 		out.Body.SubmissionID = in.ID
@@ -334,7 +337,7 @@ func registerModerationRoutes(hapi huma.API, s *store.Store, exportCache *export
 		// turn a convenience into the most expensive endpoint here. Only
 		// approvals publish anything; a bulk rejection changes nothing public.
 		if out.Body.Succeeded > 0 && in.Body.Action == "approve" {
-			exportCache.Invalidate()
+			invalidatePublished()
 		}
 		return out, nil
 	})
@@ -359,7 +362,7 @@ func registerModerationRoutes(hapi huma.API, s *store.Store, exportCache *export
 			return nil, mapModerationError(err)
 		}
 		// A revert changes what /exercises returns, so the dump has to follow.
-		exportCache.Invalidate()
+		invalidatePublished()
 
 		out := &RevertOutput{}
 		out.Body.ExerciseID = in.ID
