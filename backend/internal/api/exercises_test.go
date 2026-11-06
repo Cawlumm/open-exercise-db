@@ -267,7 +267,7 @@ func TestListExercises_PerPageCapEnforced(t *testing.T) {
 	})
 
 	_, testAPI := humatest.New(t)
-	registerExerciseRoutes(testAPI, s, "")
+	registerExerciseRoutes(testAPI, s, "", newListCache(0, listCacheMaxBytes, listCacheMaxEntries))
 
 	t.Run("per_page over 100 is rejected", func(t *testing.T) {
 		resp := testAPI.Get("/api/v1/exercises?per_page=101")
@@ -312,7 +312,7 @@ func TestListExercises_ConditionalRequestReturns304(t *testing.T) {
 	})
 
 	_, testAPI := humatest.New(t)
-	registerExerciseRoutes(testAPI, s, "")
+	registerExerciseRoutes(testAPI, s, "", newListCache(0, listCacheMaxBytes, listCacheMaxEntries))
 
 	first := testAPI.Get("/api/v1/exercises")
 	if first.Code != http.StatusOK {
@@ -384,7 +384,7 @@ func TestListExercises_ConditionalRequestHandlesListOWS(t *testing.T) {
 	})
 
 	_, testAPI := humatest.New(t)
-	registerExerciseRoutes(testAPI, s, "")
+	registerExerciseRoutes(testAPI, s, "", newListCache(0, listCacheMaxBytes, listCacheMaxEntries))
 
 	first := testAPI.Get("/api/v1/exercises")
 	if first.Code != http.StatusOK {
@@ -438,7 +438,7 @@ func TestGetExercise_ConditionalRequestReturns304(t *testing.T) {
 	})
 
 	_, testAPI := humatest.New(t)
-	registerExerciseRoutes(testAPI, s, "")
+	registerExerciseRoutes(testAPI, s, "", newListCache(0, listCacheMaxBytes, listCacheMaxEntries))
 
 	first := testAPI.Get("/api/v1/exercises/" + exerciseID)
 	if first.Code != http.StatusOK {

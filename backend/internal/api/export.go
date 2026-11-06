@@ -18,11 +18,11 @@ import (
 // as the endpoint for mirrors doing a periodic full-catalog sync, not a
 // per-request read — docs/PHASE1_BUILD_PLAN.md's WO-7 also plans this
 // endpoint's rate limit as the lowest of any GET for the same reason
-// ("meant to be cached/mirrored, not polled"). max-age matches
-// export.DefaultCacheTTL so the client-facing freshness promise never
-// undersells what the in-memory cache actually guarantees — a client
-// trusting max-age alone should never see staler data than one that
-// revalidates on every request.
+// ("meant to be cached/mirrored, not polled"). max-age is deliberately
+// shorter than export.DefaultCacheTTL: the in-memory cache is invalidated
+// the moment a moderator publishes, so a client that revalidates every 15
+// minutes picks up an approval within that window, and the revalidation
+// itself is answered from memory without touching the database.
 const exportCacheControl = "public, max-age=900, stale-while-revalidate=86400"
 
 // ExportExercisesInput takes no filters — the export is the full catalog,

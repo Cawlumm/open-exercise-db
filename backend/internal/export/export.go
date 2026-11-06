@@ -48,8 +48,20 @@ type Blob struct {
 
 // DefaultCacheTTL bounds how stale a served blob can be without any
 // explicit invalidation signal. See Cache's doc comment for why TTL is the
-// deliberate Phase 1 choice.
-const DefaultCacheTTL = 15 * time.Minute
+// deliberate Phase 1 choice. internal/api's list-exercises response cache
+// uses the same value, so the two published views age out together.
+//
+// 24 hours, not the original 15 minutes, because of database egress. Every
+// rebuild is ~2,600 queries and ~2.5 MB read out of Supabase, whose free tier
+// meters that traffic uncompressed, and Cloud Run scaling to zero means a
+// cold instance rebuilds as well. A 15-minute TTL turned an idle catalog into
+// a steady drain that, with the uncached list endpoint, went past the 5 GB
+// monthly allowance. Every write the API server performs invalidates the
+// cache directly (internal/api's moderation routes), so the TTL only bounds
+// writes this process cannot see: cmd/import-freeexercisedb and
+// cmd/migrate-media run as separate processes, and an approval on one Cloud
+// Run instance does not reach the caches of the others.
+const DefaultCacheTTL = 24 * time.Hour
 
 // Cache holds the single in-process copy of the export blob and rebuilds it
 // on demand. This is Phase 1's stand-in for the write-through-to-R2 design
@@ -137,7 +149,8 @@ func (c *Cache) expired(blob *Blob) bool {
 //
 // Called by internal/api whenever published data changes: approving a
 // submission, approving a batch, or reverting an exercise. Rejection does not
-// call it, because rejecting publishes nothing.
+// call it, because rejecting publishes nothing. The same call sites clear
+// internal/api's list-exercises response cache.
 //
 // Tests also use it to force a deterministic rebuild rather than racing a
 // timer.

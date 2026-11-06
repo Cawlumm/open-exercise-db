@@ -79,7 +79,16 @@ func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter 
 	registerSubmissionRoutes(hapi, s)
 	registerAuthRoutes(hapi, s, authCfg)
 	registerAdminAppRoutes(hapi, s)
-	registerModerationRoutes(hapi, s, exportCache)
+	// The list-exercises response cache is built here rather than in main
+	// because nothing outside this package reads or clears it. It must be
+	// cleared everywhere the export cache is, so both go behind one call and
+	// moderation never has the chance to clear one and forget the other.
+	listCache := newListCache(export.DefaultCacheTTL, listCacheMaxBytes, listCacheMaxEntries)
+	invalidatePublished := func() {
+		exportCache.Invalidate()
+		listCache.invalidate()
+	}
+	registerModerationRoutes(hapi, s, invalidatePublished)
 	registerImageUploadRoutes(hapi, s, mediaStore)
 
 	// registerExportRoutes intentionally comes before registerExerciseRoutes.
@@ -105,7 +114,7 @@ func Register(hapi huma.API, s *store.Store, exportCache *export.Cache, limiter 
 	// the more specific path first and neither router's resolution rule
 	// matters.
 	registerExportRoutes(hapi, s, exportCache)
-	registerExerciseRoutes(hapi, s, imageBaseURL)
+	registerExerciseRoutes(hapi, s, imageBaseURL, listCache)
 	registerMetaRoutes(hapi, s)
 	registerImageRoutes(hapi, s, mediaStore)
 }
