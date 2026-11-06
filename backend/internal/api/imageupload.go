@@ -189,6 +189,8 @@ func registerImageUploadRoutes(hapi huma.API, s *store.Store, mediaStore media.S
 			return nil, mapStoreError(err, "")
 		}
 
+		recordUploadVariants(ctx, s, mediaStore, imageID, key, encoded)
+
 		out := &UploadImageOutput{Status: http.StatusCreated}
 		out.Body.ImageUploadID = imageID
 		out.Body.Width = encoded.Width
@@ -234,4 +236,46 @@ func checkUploadQuota(ctx context.Context, s *store.Store, app model.App) error 
 // of touching the 1,746 imported objects.
 func uploadStorageKey(appID string, now time.Time) string {
 	return fmt.Sprintf("uploads/%s/%d-%d.jpg", appID, now.Unix(), now.Nanosecond())
+}
+
+// recordUploadVariants writes an upload's full and thumb variant rows, so it
+// gets a thumbnail and a recorded hash like every imported image.
+//
+// Best effort, logged rather than returned. The upload itself is complete
+// once its exercise_images row exists: the contract synthesizes the full
+// rendition without a row, the thumb route serves the full image when no
+// thumb exists, and cmd/backfill-thumbs fills in whatever is missing. Failing
+// the request here would orphan an object the client has no id for.
+func recordUploadVariants(ctx context.Context, s *store.Store, mediaStore media.Store, imageID, key string, encoded media.EncodeResult) {
+	width, height := encoded.Width, encoded.Height
+	hash := media.ContentSHA256(encoded.Data)
+	if _, err := s.Media.UpsertImageVariant(ctx, store.UpsertImageVariantInput{
+		ImageID:       imageID,
+		Name:          model.VariantFull,
+		StorageKey:    key,
+		ContentType:   encoded.ContentType,
+		Width:         &width,
+		Height:        &height,
+		ContentSHA256: &hash,
+	}); err != nil {
+		log.Printf("upload: record full variant for %s: %v", key, err)
+	}
+
+	thumb, err := media.StoreThumb(ctx, mediaStore, key, encoded.Data)
+	if err != nil {
+		log.Printf("upload: thumb for %s: %v", key, err)
+		return
+	}
+	tw, th := thumb.Width, thumb.Height
+	if _, err := s.Media.UpsertImageVariant(ctx, store.UpsertImageVariantInput{
+		ImageID:       imageID,
+		Name:          model.VariantThumb,
+		StorageKey:    thumb.StorageKey,
+		ContentType:   thumb.ContentType,
+		Width:         &tw,
+		Height:        &th,
+		ContentSHA256: &thumb.ContentSHA256,
+	}); err != nil {
+		log.Printf("upload: record thumb variant for %s: %v", key, err)
+	}
 }

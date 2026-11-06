@@ -163,8 +163,9 @@ func TestImport_ObjectMissingButRowPresent_RepairsAndKeepsImageIDs(t *testing.T)
 	if second.ImagesUploaded != 0 {
 		t.Errorf("ImagesUploaded = %d, want 0 — repair reuses the row, it does not insert a new one", second.ImagesUploaded)
 	}
-	if mediaStore.puts != 2 {
-		t.Errorf("Put calls = %d, want 2 — the bytes must actually be rewritten", mediaStore.puts)
+	// Two full images and the thumb rebuilt from each.
+	if mediaStore.puts != 4 {
+		t.Errorf("Put calls = %d, want 4 — the bytes (and their thumbs) must actually be rewritten", mediaStore.puts)
 	}
 
 	// The whole reason repair keeps the existing id: re-inserting would

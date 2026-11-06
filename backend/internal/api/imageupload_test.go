@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/textproto"
 	"testing"
+
+	"github.com/Cawlumm/open-exercise-db/internal/model"
 )
 
 // realPNG builds an actual image, so the re-encode path runs for real rather
@@ -82,6 +84,23 @@ func TestUpload_StoresPendingAndReEncodes(t *testing.T) {
 	if r := api.Get("/api/v1/images/"+out.ImageUploadID, "User-Agent: "+testUA,
 		"Authorization: Bearer "+modToken); r.Code != http.StatusOK {
 		t.Errorf("moderator cannot see the pending upload (%d)", r.Code)
+	}
+
+	// An upload gets a thumb and a hashed full row at write time, like an
+	// imported image, so it needs nothing from cmd/backfill-thumbs.
+	imgs, err := s.Media.ListImagesByIDs(context.Background(), []string{out.ImageUploadID})
+	if err != nil || len(imgs) != 1 {
+		t.Fatalf("ListImagesByIDs = %v, %v", imgs, err)
+	}
+	vs := imgs[0].Variants
+	if len(vs) != 2 || vs[0].Name != model.VariantFull || vs[1].Name != model.VariantThumb {
+		t.Fatalf("variants = %+v, want full then thumb", vs)
+	}
+	if vs[0].ContentSHA256 == nil || vs[1].ContentSHA256 == nil {
+		t.Error("upload variants have no recorded content hash")
+	}
+	if vs[1].Width == nil || *vs[1].Width != 128 {
+		t.Errorf("thumb width = %v, want 128", vs[1].Width)
 	}
 }
 

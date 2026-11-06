@@ -50,13 +50,23 @@ func (s *MediaStore) GetImageByStorageKey(ctx context.Context, storageKey string
 // to resolve storage_key/content_type before streaming bytes from
 // media.Store, and mapStoreError translates the not-found case to a 404
 // there, same as every other id lookup in this package.
+//
+// Also reads the full rendition's recorded content hash (ContentSHA256), in
+// the same round trip, so the route can answer If-None-Match before it
+// reads any bytes. A missing full variant row or an unrecorded hash leaves
+// it nil.
 func (s *MediaStore) GetImageByID(ctx context.Context, id string) (model.Image, error) {
-	query := fmt.Sprintf(`SELECT %s FROM exercise_images WHERE id = $1`, imageColumns)
+	query := fmt.Sprintf(`
+		SELECT %s, v.content_sha256 FROM exercise_images i
+		LEFT JOIN exercise_image_variants v ON v.image_id = i.id AND v.name = $2
+		WHERE i.id = $1`,
+		"i."+strings.ReplaceAll(imageColumns, ", ", ", i."))
 
 	var img model.Image
-	err := s.pool.QueryRow(ctx, query, id).Scan(
+	err := s.pool.QueryRow(ctx, query, id, model.VariantFull).Scan(
 		&img.ID, &img.StorageKey, &img.ContentType, &img.Width, &img.Height,
 		&img.License, &img.AttributionText, &img.UploadedBy, &img.Status, &img.CreatedAt,
+		&img.ContentSHA256,
 	)
 	if err != nil {
 		return model.Image{}, err
@@ -120,7 +130,7 @@ func (s *MediaStore) ListImagesByIDs(ctx context.Context, ids []string) ([]model
 }
 
 // variantColumns is the explicit column list every variant read shares.
-const variantColumns = `id, image_id, name, storage_key, content_type, width, height, created_at`
+const variantColumns = `id, image_id, name, storage_key, content_type, width, height, created_at, content_sha256`
 
 // variantsForImages returns every variant row for imageIDs, grouped by
 // image id.
@@ -152,7 +162,7 @@ func (s *MediaStore) variantsForImages(ctx context.Context, imageIDs []string) (
 		var imageID string
 		if err := rows.Scan(
 			&v.ID, &imageID, &v.Name, &v.StorageKey, &v.ContentType,
-			&v.Width, &v.Height, &v.CreatedAt,
+			&v.Width, &v.Height, &v.CreatedAt, &v.ContentSHA256,
 		); err != nil {
 			return nil, fmt.Errorf("scan image variant: %w", err)
 		}
@@ -190,7 +200,7 @@ func (s *MediaStore) GetImageVariant(ctx context.Context, imageID, name string) 
 	var scannedImageID, imageStatus string
 	err := s.pool.QueryRow(ctx, query, imageID, name).Scan(
 		&v.ID, &scannedImageID, &v.Name, &v.StorageKey, &v.ContentType,
-		&v.Width, &v.Height, &v.CreatedAt, &imageStatus,
+		&v.Width, &v.Height, &v.CreatedAt, &v.ContentSHA256, &imageStatus,
 	)
 	if err != nil {
 		return model.ImageVariant{}, "", err
@@ -206,18 +216,25 @@ func (s *MediaStore) GetImageVariant(ctx context.Context, imageID, name string) 
 // is rejected by the table's UNIQUE constraint rather than silently
 // re-pointed: two images sharing one object is a corruption that reads as
 // success until one of them is deleted.
+//
+// content_sha256 is overwritten unconditionally, including with NULL. A
+// re-encode replaces the bytes, so a hash the caller did not restate is a
+// hash of bytes that may no longer exist; clearing it sends the image route
+// back to hashing what is actually stored rather than answering 304 for
+// content the client has never seen.
 func (s *MediaStore) UpsertImageVariant(ctx context.Context, in UpsertImageVariantInput) (string, error) {
 	var id string
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO exercise_image_variants (image_id, name, storage_key, content_type, width, height)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO exercise_image_variants (image_id, name, storage_key, content_type, width, height, content_sha256)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (image_id, name) DO UPDATE
 		SET storage_key = EXCLUDED.storage_key,
 		    content_type = EXCLUDED.content_type,
 		    width = EXCLUDED.width,
-		    height = EXCLUDED.height
+		    height = EXCLUDED.height,
+		    content_sha256 = EXCLUDED.content_sha256
 		RETURNING id`,
-		in.ImageID, in.Name, in.StorageKey, in.ContentType, in.Width, in.Height,
+		in.ImageID, in.Name, in.StorageKey, in.ContentType, in.Width, in.Height, in.ContentSHA256,
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("upsert image variant (%s, %s): %w", in.ImageID, in.Name, err)
@@ -236,6 +253,61 @@ type UpsertImageVariantInput struct {
 	ContentType string
 	Width       *int
 	Height      *int
+	// ContentSHA256 is media.ContentSHA256 of the bytes just written, or
+	// nil if the caller does not have them. See UpsertImageVariant.
+	ContentSHA256 *string
+}
+
+// ListImagesNeedingThumb returns up to limit images, ordered by id and
+// strictly after afterID, that still lack a thumb rendition or a recorded
+// hash on their full rendition (including images with no full variant row
+// at all, which is every app upload made before thumbnails existed).
+//
+// The predicate is the resume mechanism for cmd/backfill-thumbs: an image
+// drops out of it the moment both rows are written, so a re-run sees only
+// what an earlier run did not finish, and a run with nothing to do sees
+// nothing. The id cursor keeps one run from revisiting an image it just
+// failed on.
+func (s *MediaStore) ListImagesNeedingThumb(ctx context.Context, afterID string, limit int) ([]model.Image, error) {
+	query := fmt.Sprintf(`
+		SELECT %s FROM exercise_images i
+		WHERE ($1::uuid IS NULL OR i.id > $1::uuid)
+		  AND (
+		    NOT EXISTS (SELECT 1 FROM exercise_image_variants t WHERE t.image_id = i.id AND t.name = $2)
+		    OR NOT EXISTS (SELECT 1 FROM exercise_image_variants f
+		                   WHERE f.image_id = i.id AND f.name = $3 AND f.content_sha256 IS NOT NULL)
+		  )
+		ORDER BY i.id
+		LIMIT $4`,
+		"i."+strings.ReplaceAll(imageColumns, ", ", ", i."))
+
+	// NULL rather than '' for "from the start": Postgres does not promise to
+	// short-circuit OR, so '' would still reach the ::uuid cast and fail.
+	var cursor *string
+	if afterID != "" {
+		cursor = &afterID
+	}
+	rows, err := s.pool.Query(ctx, query, cursor, model.VariantThumb, model.VariantFull, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list images needing thumb: %w", err)
+	}
+	defer rows.Close()
+
+	var out []model.Image
+	for rows.Next() {
+		var img model.Image
+		if err := rows.Scan(
+			&img.ID, &img.StorageKey, &img.ContentType, &img.Width, &img.Height,
+			&img.License, &img.AttributionText, &img.UploadedBy, &img.Status, &img.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan image: %w", err)
+		}
+		out = append(out, img)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list images needing thumb: %w", err)
+	}
+	return out, nil
 }
 
 // InsertImageInput is the set of fields the importer controls when

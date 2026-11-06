@@ -36,6 +36,12 @@ alongside an app.
 `0004_unaccent.sql` enables the `unaccent` extension, which exercise search uses to match names
 and aliases regardless of accents (`extension` finds `Extensión`). It changes no tables.
 
+`0005_image_variant_content_hash.sql` adds a nullable `content_sha256` to
+`exercise_image_variants`, so the image routes can answer `If-None-Match`
+from the row instead of downloading the object to hash it. NULL means
+unknown and falls back to hashing the bytes; `cmd/backfill-thumbs` fills it
+for existing images.
+
 ## Migrations run against a lock, and can run concurrently
 
 `Migrate` holds a Postgres advisory lock across the whole check-and-apply, so

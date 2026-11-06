@@ -75,7 +75,7 @@ type Image struct {
 	// selects a rendition by name works now and keeps working the day
 	// thumbnails land, instead of having to grow a second code path when a
 	// second entry appears.
-	Variants []ImageVariant `json:"variants" doc:"Available renditions, full first. Only full exists today; smaller sizes get added without changing url"`
+	Variants []ImageVariant `json:"variants" doc:"Available renditions, full first, then thumb (longest edge at most 128px) once generated. Pick by name; url is unchanged"`
 }
 
 // ImageVariant is one fetchable rendition of an Image.
@@ -91,7 +91,7 @@ type Image struct {
 // separate identifier would invite consumers to store it, making a re-encode
 // — which legitimately replaces the row — look like a deletion.
 type ImageVariant struct {
-	Name        string `json:"name" doc:"Rendition name — always full today; thumb/medium as they are added"`
+	Name        string `json:"name" doc:"Rendition name: full, or thumb (longest edge at most 128px). Ignore names you do not recognise"`
 	URL         string `json:"url" doc:"Directly fetchable, resolved exactly as Image.url is"`
 	Width       *int   `json:"width,omitempty"`
 	Height      *int   `json:"height,omitempty"`
