@@ -30,6 +30,14 @@ this project fills.
 
 Full design rationale, data model, and phased build plan: **[`docs/DESIGN.md`](docs/DESIGN.md)**.
 
+## Bulk data
+
+Apps that need the whole catalog should read the static snapshot, not the API:
+`https://cawlumm.github.io/open-exercise-db/v1/manifest.json` (fallback:
+`https://raw.githubusercontent.com/Cawlumm/open-exercise-db/catalog/v1/manifest.json`). It is
+rebuilt every 6 hours, costs nothing per request and is safe to fetch with `If-None-Match`.
+Format and refresh rules: [`docs/API_POLICY.md`](docs/API_POLICY.md#static-snapshot-for-bulk-and-sync-clients).
+
 ## Status
 
 Phase 1 (data model, read API, the free-exercise-db bootstrap import, and public-API

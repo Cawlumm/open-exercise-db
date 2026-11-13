@@ -290,3 +290,7 @@ func floodGuardMiddleware(hapi huma.API, limiter *ratelimit.Limiter) func(huma.C
 		next(ctx)
 	}
 }
+
+// IsIdentifiedUA exports isIdentifiedUA so first-party clients (the snapshot
+// publisher) can assert their User-Agent is accepted without a copy of the rule.
+func IsIdentifiedUA(ua string) bool { return isIdentifiedUA(ua) }

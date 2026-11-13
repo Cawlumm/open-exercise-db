@@ -263,9 +263,42 @@ It's cached in-process and served with a long `Cache-Control`/`ETag`
 catalog costs almost nothing on either side — use that instead of re-downloading the full body
 every time.
 
+**Bulk and sync clients must use the [static snapshot](#static-snapshot-for-bulk-and-sync-clients)
+instead of `/export`.** The export stays available for low-volume use (a one-off script, a
+spot check), but every scheduled mirror belongs on the snapshot: it costs this project nothing
+per request, and the API does not.
+
 If your access pattern is "poll `/export` frequently to notice changes quickly," talk to us
 first (see [Requesting more](#requesting-more)) — there's likely a better fit than raising this
 tier's limit.
+
+## Static snapshot for bulk and sync clients
+
+Anything that reads the whole catalog on a schedule — an app syncing its local exercise table,
+a mirror, an offline cache — **MUST** read the static snapshot, not the API:
+
+- Primary: `https://cawlumm.github.io/open-exercise-db/v1/manifest.json`
+- Fallback: `https://raw.githubusercontent.com/Cawlumm/open-exercise-db/catalog/v1/manifest.json`
+
+Try the primary, and use the fallback only if it fails. Both serve the same files from the
+`catalog` branch.
+
+**Format.** The manifest is `{"schema_version":1,"generated_at":"<RFC3339 UTC>","source":"<api base>","locales":[{"code","file","total","sha256"}]}`,
+`en` first. Each `file` is relative to the manifest's directory, named
+`exercises.<locale>.<first 16 hex of sha256>.json`, and holds `{"exercises":[...],"total":N}`:
+the same exercise objects the API returns (for non-`en` locales, as `GET /exercises?locale=X`
+returns them), sorted by `id`. The file name contains its own hash, so a cached manifest can
+never point at the wrong version of a file; `sha256` is over the exact file bytes. Image
+`url`s are relative to the API (`/api/v1/images/{id}`), not to the snapshot: images are still
+served by the API.
+
+**Refreshing.** Fetch the manifest with `If-None-Match` (and use `generated_at` to see whether
+anything changed), then fetch only the locale files whose `file` you do not already hold.
+Reject a file whose bytes do not match `sha256`. Check that `schema_version` is one you
+understand.
+
+**Cadence.** The snapshot is rebuilt every 6 hours and a new manifest is published only when
+the catalog changed. Polling more often than that gains nothing.
 
 ## Rate-limit response format
 

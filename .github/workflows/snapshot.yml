@@ -1,0 +1,77 @@
+# Publishes the static catalog snapshot to the `catalog` branch (GitHub Pages
+# source). See docs/DEPLOYMENT.md, "Static catalog snapshot".
+#
+# It reads the PUBLIC HTTP API, not the database, so Actions holds no DB
+# credentials or secrets: the only token is the built-in GITHUB_TOKEN, used to
+# push the branch.
+#
+# cmd/build-snapshot refuses to write (job fails, live snapshot untouched) on
+# any HTTP error, a count that disagrees with the API's total, zero exercises,
+# duplicate ids, a locale whose ids differ from en, or an en catalog under half
+# the published size (override: run manually with confirm_removals).
+name: Snapshot
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      confirm_removals:
+        description: 'Publish even if the en catalog shrank to under half of what is published'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Check out the catalog branch (or start it)
+        run: |
+          set -euo pipefail
+          repo="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          if git ls-remote --exit-code --heads "$repo" catalog >/dev/null; then
+            git clone --branch catalog --single-branch "$repo" catalog
+          else
+            git init --initial-branch=catalog catalog
+            git -C catalog remote add origin "$repo"
+          fi
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Build snapshot
+        working-directory: backend
+        run: |
+          flags=""
+          if [ "${{ inputs.confirm_removals }}" = "true" ]; then flags="-confirm-removals"; fi
+          go run ./cmd/build-snapshot -out ../catalog $flags
+
+      - name: Commit and push
+        working-directory: catalog
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "catalog unchanged; nothing to publish"
+            exit 0
+          fi
+          generated_at="$(sed -n 's/.*"generated_at": "\(.*\)".*/\1/p' v1/manifest.json)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Snapshot ${generated_at}"
+          git push origin catalog

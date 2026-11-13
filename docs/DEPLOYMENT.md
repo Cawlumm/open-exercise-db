@@ -651,6 +651,32 @@ look like a broken deployment.
     a keepalive that quietly stopped looks exactly like one that is working, right up until
     the project pauses.
 
+## Static catalog snapshot
+
+`.github/workflows/snapshot.yml` publishes the catalog as static files on the `catalog` branch
+(the GitHub Pages source) so bulk readers never touch the API or the database. It runs every 6
+hours (`17 */6 * * *`) on `main` only, and can be run by hand: Actions, Snapshot, Run workflow.
+
+It reads the public API with `cmd/build-snapshot` (`-api`, `-out`, `-confirm-removals`), so it
+needs no secrets beyond the built-in `GITHUB_TOKEN`. The first run creates the `catalog` branch
+as an orphan; after that, enable Pages from the `catalog` branch root. Files are
+content-addressed and old ones are kept, so `git log catalog` is the archive of every published
+version. A run that finds nothing changed commits nothing.
+
+To try it locally: `cd backend && go run ./cmd/build-snapshot -out /some/dir`; running it twice
+should print `unchanged` the second time.
+
+**It refuses to publish** (the job fails and the live snapshot is untouched) on: any HTTP error
+after retries, a collected count different from the API's `total`, zero exercises, duplicate
+ids, a non-`en` locale whose ids differ from `en`, or an `en` count under half of what the
+`catalog` branch's manifest records. A failure is retried once over the whole collection first.
+
+**Confirming removals.** If the catalog really did shrink by more than half, run the workflow
+manually with `confirm_removals` ticked. Do this only after checking the drop is intended.
+
+Image bytes still come from the API (`/api/v1/images/{id}`) until `IMAGE_BASE_URL` points at a
+custom domain on the R2 bucket; see [Known gaps](#known-gaps).
+
 ---
 
 ## Known gaps
