@@ -12,176 +12,71 @@
 <p align="center">
   <img alt="code license" src="https://img.shields.io/badge/code%20license-MIT-blue">
   <img alt="data license" src="https://img.shields.io/badge/data%20license-CC0%201.0-lightgrey">
-  <img alt="status" src="https://img.shields.io/badge/status-phase%202-yellow">
+  <img alt="status" src="https://img.shields.io/badge/status-early%20but%20live-yellow">
 </p>
 
 ---
 
-## Why this exists
+## What is open-exercise-db?
 
-open-exercise-db is OpenFoodFacts, but for fitness: an open, community-maintained catalog of
-exercises that any app can build on. Anyone can submit an exercise or a fix, moderators review
-it, every published change is versioned and revertible, names and instructions are
-translatable, the data is CC0, and the whole thing is a documented API. The projects it builds
-on are credited under [Sources and related projects](#sources-and-related-projects).
+### An exercise database
 
-Full design rationale, data model, and phased build plan: **[`docs/DESIGN.md`](docs/DESIGN.md)**.
+Exercises with their muscles, equipment, step-by-step instructions, images and translations.
+About 870 to start with, in English and Spanish.
 
-## Bulk data
+### Made by everyone
 
-Apps that need the whole catalog should read the static snapshot, not the API:
-`https://cawlumm.github.io/open-exercise-db/v1/manifest.json` (fallback:
-`https://raw.githubusercontent.com/Cawlumm/open-exercise-db/catalog/v1/manifest.json`). It is
-rebuilt every 6 hours, costs nothing per request and is safe to fetch with `If-None-Match`.
-Format and refresh rules: [`docs/API_POLICY.md`](docs/API_POLICY.md#static-snapshot-for-bulk-and-sync-clients).
+Anyone can add an exercise, fix one or translate it from inside an app that uses the
+database. Every change is reviewed before it is published, and every published change can
+be reverted.
 
-## Status
+### For everyone
 
-Phase 1 (data model, read API, the free-exercise-db bootstrap import, and public-API
-hardening) is done and deployed. Phase 2 — GitHub sign-in, app credentials, the submission
-queue, moderation, payload validation and image upload — is implemented and runnable via the
-Quickstart below. There is no web UI yet, so moderation is API-only.
-Every `GET` endpoint is rate-limited and requires a `User-Agent`; see
-[`docs/API_POLICY.md`](docs/API_POLICY.md) for the published limits, the `User-Agent` format,
-debounce guidance for search, and how to request a higher limit.
-See [`docs/DESIGN.md`](docs/DESIGN.md) and [`docs/PHASE1_BUILD_PLAN.md`](docs/PHASE1_BUILD_PLAN.md)
-for the full phased build plan and current work-order status.
+The data is public domain ([CC0](DATA_LICENSE)), so any app can use it for anything, and the
+code is [MIT](LICENSE).
 
-## Quickstart
+## Use the data
 
-This sequence has been run start-to-finish on a fresh clone, including the containerized
-backend — not just `go run`.
+**The whole catalog**, for apps that keep a local copy: a static snapshot, rebuilt every 6
+hours and free to fetch.
+
+```
+https://cawlumm.github.io/open-exercise-db/v1/manifest.json
+```
+
+**Live queries**, for search and single lookups: the API.
 
 ```bash
-git clone https://github.com/Cawlumm/open-exercise-db.git
-cd open-exercise-db
-cp .env.example .env          # Windows: copy .env.example .env
-docker compose up -d --wait   # builds the backend image, waits for both containers to be ready
+curl -A "MyApp/1.0 (you@example.com)" \
+  "https://oedb-api-o4dqddih5q-uk.a.run.app/api/v1/exercises?q=squat"
 ```
 
-`docker compose up -d --wait` brings up Postgres and the API, and blocks until both are
-considered ready (Postgres via its healthcheck; migrations run automatically against it on the
-API's first boot — see `internal/database.Migrate` in `cmd/api-server/main.go`). At this point
-`/health` and `/docs` already respond, but `/exercises` returns an empty list — the database
-schema exists, but it has no rows until you run the bootstrap importer once:
-
-```bash
-cd backend
-DATABASE_URL="postgres://openexercisedb:openexercisedb@localhost:5432/openexercisedb?sslmode=disable" \
-  go run ./cmd/import-freeexercisedb
-```
-
-```powershell
-# PowerShell equivalent
-cd backend
-$env:DATABASE_URL = "postgres://openexercisedb:openexercisedb@localhost:5432/openexercisedb?sslmode=disable"
-go run ./cmd/import-freeexercisedb
-```
-
-This fetches `yuhonas/free-exercise-db`'s ~800 exercises and re-hosts their images locally
-under `backend/data/media` (gitignored) — it downloads real images over the network, so expect
-it to take a few minutes on first run. It's idempotent: re-running it upserts on
-`exercises.source_id` rather than duplicating (`--dry-run` reports without writing; `--limit N`
-imports a subset for fast iteration). The importer isn't baked into the `backend` container
-image — it's a one-off bootstrap/admin tool per `docs/CONVENTIONS.md`'s `cmd/` layout, run
-against the same Postgres the compose stack already published on `localhost:5432`, so
-`DATABASE_URL` here points at `localhost`, not the `postgres` service-network hostname the
-container itself uses.
-
-Re-running it is also how you **repair missing images**. Image rows live in Postgres while
-the bytes live in `MEDIA_DIR` (or an R2 bucket), and the two can be lost independently — a
-media directory that wasn't on a persistent volume, a recreated bucket. The importer checks
-that each image's object actually exists rather than trusting the row, and re-downloads the
-ones that don't, keeping their existing ids so no revision changes. A run that repairs
-anything says so:
-
-```
-images(uploaded=0 reused=0 repaired=1746 failed=0)
-WARNING: 1746 image(s) had a database row but no stored object, and were re-downloaded.
-```
-
-That warning means storage lost data Postgres didn't — the import fixed the symptom, but
-check `MEDIA_DIR`/`R2_BUCKET` before it happens again.
-
-Once the import finishes, the API is live:
-
-```bash
-curl http://localhost:8080/health
-curl http://localhost:8080/api/v1/exercises
-```
-
-The API is served at `http://localhost:8080/api/v1`, with interactive docs at
-`http://localhost:8080/docs` and the raw OpenAPI 3.1 spec at
-`http://localhost:8080/api/v1/openapi.json`.
-
-**On `PORT`**: both `.env.example` and `docker-compose.yml` define `PORT=8080`. Only the
-compose file's `ports:` mapping actually reads your `.env` value (`"${PORT:-8080}:8080"`) — it
-picks which **host** port publishes the API. The container's own `PORT` env var is fixed at
-`8080` in `docker-compose.yml` regardless, so the API always listens on `8080` *inside* the
-container. Net effect: setting `PORT=9090` in `.env` makes the API reachable at
-`localhost:9090` (verified) without touching anything else — it's a host-port override, not an
-in-container one, which is what you want 95% of the time (avoiding a local port clash), but
-worth knowing if `8080` shows up somewhere unexpected.
-
-## API summary
-
-Full spec: `GET /api/v1/openapi.json`, interactive docs at `/docs`.
-
-```
-GET  /api/v1/exercises              # search/filter/list, public, no auth
-GET  /api/v1/exercises/{id}         # single exercise, ?locale= for translations
-GET  /api/v1/exercises/export       # full catalog dump, for mirrors + offline consumers
-GET  /api/v1/images/{id}            # image bytes; only approved images are public
-POST /api/v1/images                 # upload an image, re-encoded on arrival (app credential)
-POST /api/v1/submissions            # propose a create/edit/translation (auth required)
-GET  /api/v1/submissions/mine       # your own submissions and their outcomes
-GET  /api/v1/auth/github            # sign in with GitHub (people, not apps)
-GET  /api/v1/admin/submissions      # moderation queue (moderator+ role)
-```
-
-Nothing a contributor sends is public when they send it. A submission waits in the queue, and
-an uploaded image is fetchable only by a moderator until the submission using it is approved —
-so an unreviewed photograph cannot be served from this API by anyone who knows its id.
-
-**Two ways to consume it**, pick whichever fits: query the API live at use time (like apps
-consume Open Food Facts), or pull the bulk dump and mirror it locally. Live is simplest and
-always current; the dump is right if you need offline operation or don't want a runtime
-dependency on this service. Key on `id` (a stable UUID), not `slug` or `name` — those can
-change when an exercise is edited upstream. Details in
-[`docs/DESIGN.md`](docs/DESIGN.md#consuming-this-api).
-
-**Every request needs a `User-Agent`** in the form `AppName/Version (ContactEmail)`, and every
-endpoint is rate-limited (tiered by cost — cheap cached reads get a generous budget, the full
-export gets the tightest one). See [`docs/API_POLICY.md`](docs/API_POLICY.md) for the exact
-numbers, debounce guidance for live search, and how to ask for a higher limit.
-
-See [`docs/DESIGN.md`](docs/DESIGN.md#api-rest-json-apiv1) for the complete endpoint list.
+Every request needs a `User-Agent` naming your app and a contact. Interactive docs are at
+[`/docs`](https://oedb-api-o4dqddih5q-uk.a.run.app/docs). Rate limits, the snapshot format and
+how to ask for more are in [`docs/API_POLICY.md`](docs/API_POLICY.md).
 
 ## Contribute
 
-- **Code**: standard fork + PR flow, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
-- **Exercise data**: submit new exercises, edits, or translations through the API — every
-  submission goes through human review before publication, and images are re-encoded on upload
-  (which also strips EXIF, so a gym photo does not publish the GPS coordinates it was taken at).
-  See [`CONTRIBUTING.md`](CONTRIBUTING.md) for style guides and the moderation SLA. A web UI is
-  Phase 3.
-- **From inside your own app**: apps can hold their own credentials and submit on behalf of
-  their users, who need no account here — the model Open Food Facts uses, and how most of its
-  data actually arrives. Submissions carry the app plus an opaque per-user handle, so one bad
-  contributor can be blocked without suspending the app. Review still applies either way.
+- **Exercises and translations**: apps submit them on their users' behalf with an app
+  credential. Every app is approved by hand while the project is small:
+  [ask for one](https://github.com/Cawlumm/open-exercise-db/issues/new?template=rate-limit-request.yml),
+  and see [how approval works](docs/API_POLICY.md#how-to-get-a-credential).
+- **Code**: fork, branch and open a pull request. [`CONTRIBUTING.md`](CONTRIBUTING.md) covers
+  setup and tests.
+- **Something wrong in the data?** [Open an issue](https://github.com/Cawlumm/open-exercise-db/issues/new/choose).
 
-This is a background, single-maintainer project — moderation turnaround is best-effort, not
-guaranteed. Patience appreciated.
+This is a one-person side project, so reviews are best-effort.
 
-## Stack
+## Run it yourself
 
-Go + [huma v2](https://huma.rocks/) (OpenAPI 3.1 generated from types) + Postgres (Supabase)
-backend, React + Vite + TypeScript web UI (Phase 3), Google Cloud Run + Cloudflare (R2,
-Pages, edge cache) hosting.
+```bash
+git clone https://github.com/Cawlumm/open-exercise-db.git
+cd open-exercise-db && cp .env.example .env
+docker compose up -d --wait
+```
 
-- Full rationale and alternatives weighed: [`docs/DESIGN.md`](docs/DESIGN.md)
-- Go project layout, layering, and code conventions: [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md)
-- Running it in production — GCP setup, secrets, bootstrap, rollback: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
+Then load the starter catalog and see [`docs/SELF_HOSTING.md`](docs/SELF_HOSTING.md) for the
+details. How it is built and why: [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## Sources and related projects
 
@@ -211,6 +106,4 @@ open an issue.
 
 ## License
 
-Code is [MIT](LICENSE). Exercise **data** (database contents, API responses, exports) is
-[CC0 1.0](DATA_LICENSE) — public domain, no attribution required, though individual entries
-may carry provenance metadata as a courtesy.
+Code: [MIT](LICENSE). Data: [CC0 1.0](DATA_LICENSE), public domain, no attribution required.

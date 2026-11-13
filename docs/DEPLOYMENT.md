@@ -692,6 +692,33 @@ custom domain on the R2 bucket; see [Known gaps](#known-gaps).
 
 ---
 
+## Approving an app
+
+Apps are approved by hand ([API_POLICY.md](API_POLICY.md#how-to-get-a-credential) tells
+developers how to ask). To approve a request:
+
+1. Check it against the criteria in API_POLICY: a real app, a reachable contact, sensible
+   volume, and a CC0 notice to its users if it will submit data.
+2. Sign in as an admin: open `$API/api/v1/auth/github` in a browser and keep the `token` from
+   the callback response.
+3. Register the app. The response contains the app's credential **once**; it is not stored
+   and cannot be shown again.
+
+   ```bash
+   curl -sS -X POST "$API/api/v1/admin/apps" \
+     -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+     -A "oedb-admin/1 (maintainer)" \
+     -d '{"name": "SomeApp", "contact_email": "dev@someapp.example"}'
+   ```
+
+   `max_pending` and `max_per_day` are optional and cap how many submissions the app can
+   have waiting and send per day.
+4. Email the `token` to the contact address. Never paste it into the issue. Reply on the issue
+   that the credential was sent, and close it.
+
+If a credential leaks, `POST /api/v1/admin/apps/{id}/rotate` issues a new one and voids the
+old. `POST /api/v1/admin/apps/{id}/status` suspends or restores an app.
+
 ## Known gaps
 
 **Image bytes proxy through the API.** `IMAGE_BASE_URL` is unset, so `media.ImageURL` returns

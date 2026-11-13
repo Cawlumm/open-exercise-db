@@ -236,6 +236,25 @@ public read.
 their own tier for an app exactly as for anyone else: they are the heaviest requests in the
 API, and registering does not make polling them reasonable. Mirror the dump on a schedule.
 
+### How to get a credential
+
+Every app is approved by hand while the project is small. There is no self-serve sign-up.
+
+1. Open an [app credential request](https://github.com/Cawlumm/open-exercise-db/issues/new?template=rate-limit-request.yml):
+   your app, what it does, expected volume, whether it will submit data, and a contact
+   address.
+2. The maintainer reviews it. Expect a few days; this is a one-person project.
+3. If approved, the credential is sent **privately to the contact address**. It is never
+   posted in the issue, and you should never post it anywhere either.
+
+An app is approved when it is a real app with a reachable contact, its volume fits the
+limits above (or it mirrors the snapshot instead), and, if it will submit data, it tells its
+users that what they contribute is dedicated to the public domain (see
+[Submitting data on your users' behalf](#submitting-data-on-your-users-behalf)).
+
+A credential can be rotated if it leaks and suspended if an app misbehaves. Write to the
+maintainer through the same issue if you need a new one.
+
 Anonymous access is not going away and needs no key. This exists so the consumers who *are*
 accountable are not held to a limit sized for anonymous traffic.
 
