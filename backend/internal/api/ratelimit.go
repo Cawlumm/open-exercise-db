@@ -3,7 +3,6 @@ package api
 import (
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -125,39 +124,6 @@ func isIdentifiedUA(ua string) bool {
 	return uaFormatPattern.MatchString(trimmed)
 }
 
-// clientKey extracts the identity internal/ratelimit.Limiter buckets on.
-// Cloudflare sits in front of the origin in every real deployment
-// (docs/DESIGN.md → Hosting) and forwards the real client address in
-// CF-Connecting-IP; without honoring that, this process would only ever
-// see Cloudflare's own edge IP as the TCP peer and bucket every consumer
-// on earth into one counter, which would make the origin backstop
-// actively harmful rather than merely coarse. X-Forwarded-For is the
-// generic fallback for any other reverse proxy in the chain (or a
-// self-hosted deployment without Cloudflare in front); ctx.RemoteAddr() is
-// the last resort for a direct connection (local dev, docker compose).
-//
-// Trusting a client-supplied header for identity would normally be a
-// spoofing risk, but it isn't one that matters for what this limiter is:
-// internal/ratelimit's package doc is explicit that this is a coarse
-// per-instance backstop, not the source of truth for enforcement. A client
-// that spoofs CF-Connecting-IP to dodge the origin's bucketing still has
-// to get past Cloudflare's own edge rule first (docs/API_POLICY.md), which
-// reads the real TCP-level connection, not a header a client controls.
-func clientKey(ctx huma.Context) string {
-	if v := strings.TrimSpace(ctx.Header("CF-Connecting-IP")); v != "" {
-		return v
-	}
-	if v := ctx.Header("X-Forwarded-For"); v != "" {
-		if first := strings.TrimSpace(strings.SplitN(v, ",", 2)[0]); first != "" {
-			return first
-		}
-	}
-	if host, _, err := net.SplitHostPort(ctx.RemoteAddr()); err == nil && host != "" {
-		return host
-	}
-	return ctx.RemoteAddr()
-}
-
 // rateLimitMiddleware enforces limiter's per-tier, per-client buckets on
 // every operation registered by this package, and applies
 // docs/API_POLICY.md's User-Agent requirement (via isIdentifiedUA) to
@@ -175,7 +141,7 @@ func clientKey(ctx huma.Context) string {
 // header spec, and WO-7's original citation was wrong. A denied request
 // additionally gets Retry-After (RFC 9110 §10.2.3, a real, unrelated-draft
 // standard header) and never reaches the handler.
-func rateLimitMiddleware(hapi huma.API, limiter *ratelimit.Limiter) func(huma.Context, func(huma.Context)) {
+func rateLimitMiddleware(hapi huma.API, limiter *ratelimit.Limiter, mode string) func(huma.Context, func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
 		op := ctx.Operation()
 		tier, ok := op.Metadata[rateLimitTierKey].(ratelimit.Tier)
@@ -193,8 +159,8 @@ func rateLimitMiddleware(hapi huma.API, limiter *ratelimit.Limiter) func(huma.Co
 		// This runs after appAuthMiddleware, so the app here has had its secret
 		// verified against the database. Reading the key id out of the
 		// credential without verifying it would be the same mistake as trusting
-		// CF-Connecting-IP: anyone could mint a fresh bucket by claiming an id.
-		key, tier, identified := billingFor(ctx, tier)
+		// a client-supplied forwarding header: anyone could mint a fresh bucket by claiming an id.
+		key, tier, identified := billingFor(ctx, tier, mode)
 		decision := limiter.Allow(key, tier, identified)
 
 		ctx.SetHeader("RateLimit-Limit", strconv.Itoa(decision.Limit))
@@ -244,10 +210,10 @@ const appBucketPrefix = "app:"
 // the API and is meant to be mirrored on a schedule; registering an app is not a
 // reason to let it be polled, so an app doing exports still spends the export
 // budget, keyed to itself.
-func billingFor(ctx huma.Context, tier ratelimit.Tier) (string, ratelimit.Tier, bool) {
+func billingFor(ctx huma.Context, tier ratelimit.Tier, mode string) (string, ratelimit.Tier, bool) {
 	app, ok := AppFromContext(ctx.Context())
 	if !ok {
-		return clientKey(ctx), tier, isIdentifiedClient(ctx)
+		return clientKey(ctx, mode), tier, isIdentifiedClient(ctx)
 	}
 	if tier == ratelimit.TierExport {
 		return appBucketPrefix + app.ID, ratelimit.TierExport, true
@@ -275,9 +241,9 @@ func billingFor(ctx huma.Context, tier ratelimit.Tier) (string, ratelimit.Tier, 
 // before the policy limiter rather than after it, so without this a client
 // looping malformed query strings would be rejected for free — the same
 // unmetered path a previous fix closed.
-func floodGuardMiddleware(hapi huma.API, limiter *ratelimit.Limiter) func(huma.Context, func(huma.Context)) {
+func floodGuardMiddleware(hapi huma.API, limiter *ratelimit.Limiter, mode string) func(huma.Context, func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
-		decision := limiter.Allow(clientKey(ctx), ratelimit.TierFlood, true)
+		decision := limiter.Allow(clientKey(ctx, mode), ratelimit.TierFlood, true)
 		if !decision.Allowed {
 			ctx.SetHeader("RateLimit-Limit", strconv.Itoa(decision.Limit))
 			ctx.SetHeader("RateLimit-Remaining", strconv.Itoa(decision.Remaining))

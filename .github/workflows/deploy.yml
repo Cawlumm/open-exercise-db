@@ -223,7 +223,7 @@ jobs:
             --timeout=120s \
             --execution-environment=gen1 \
             --cpu-boost \
-            --set-env-vars="ENV=production,R2_ACCOUNT_ID=${{ vars.R2_ACCOUNT_ID }},R2_BUCKET=${{ vars.R2_BUCKET }},ADMIN_GITHUB_LOGINS=${{ vars.ADMIN_GITHUB_LOGINS }},GITHUB_OAUTH_REDIRECT_URL=${{ vars.OAUTH_REDIRECT_URL }}" \
+            --set-env-vars="ENV=production,R2_ACCOUNT_ID=${{ vars.R2_ACCOUNT_ID }},R2_BUCKET=${{ vars.R2_BUCKET }},ADMIN_GITHUB_IDS=${{ vars.ADMIN_GITHUB_IDS }},GITHUB_OAUTH_REDIRECT_URL=${{ vars.OAUTH_REDIRECT_URL }}" \
             --set-secrets="DATABASE_URL=oedb-database-url:latest,R2_ACCESS_KEY_ID=oedb-r2-access-key-id:latest,R2_SECRET_ACCESS_KEY=oedb-r2-secret-access-key:latest,JWT_SECRET=oedb-jwt-secret:latest,GITHUB_OAUTH_CLIENT_ID=oedb-github-client-id:latest,GITHUB_OAUTH_CLIENT_SECRET=oedb-github-client-secret:latest" \
             --quiet
 

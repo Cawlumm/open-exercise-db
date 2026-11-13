@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -21,6 +23,13 @@ const (
 	maxInstructions    = 40
 	maxAliases         = 20
 	maxSecondaryMuscle = 10
+
+	// Provenance text is published verbatim on the exercise and in the
+	// export, so it is bounded like the rest of the prose. 2048 is the
+	// conventional practical ceiling for a URL.
+	maxSourceURLLen     = 2048
+	maxAttributionLen   = 500
+	maxChangeSummaryLen = 500
 )
 
 // exercisePayload is the shape a create or edit proposes.
@@ -41,6 +50,10 @@ type exercisePayload struct {
 	Instructions     *[]string `json:"instructions"`
 	Aliases          *[]string `json:"aliases"`
 	SecondaryMuscles *[]string `json:"secondary_muscles"`
+	License          *string   `json:"license"`
+	AttributionText  *string   `json:"attribution_text"`
+	SourceURL        *string   `json:"source_url"`
+	ChangeSummary    *string   `json:"change_summary"`
 }
 
 // validatePayloadFields checks a submission's content against the field rules
@@ -68,6 +81,14 @@ func validatePayloadFields(ctx context.Context, s *store.Store, subType string, 
 	}
 
 	var problems []string
+
+	// A translation is a name and instructions in another language. It still
+	// gets the same length, blank and count rules as English content, but it
+	// does not need the taxonomy fields a create needs and is never checked
+	// against the English vocabulary.
+	if subType == "translation" && (p.Name == nil || strings.TrimSpace(*p.Name) == "") {
+		problems = append(problems, "name is required for a translation")
+	}
 
 	// A create must carry the fields an exercise cannot exist without. An
 	// edit need not: it proposes a subset, and demanding the whole record
@@ -98,9 +119,11 @@ func validatePayloadFields(ctx context.Context, s *store.Store, subType string, 
 	problems = append(problems, checkStrings("aliases", p.Aliases, maxAliases, maxNameLen)...)
 	problems = append(problems, checkStrings("secondary_muscles", p.SecondaryMuscles, maxSecondaryMuscle, maxNameLen)...)
 
+	problems = append(problems, checkProvenance(p)...)
+
 	// Taxonomy last: it costs a query, and there is no point spending one on a
-	// payload already known to be malformed.
-	if len(problems) == 0 {
+	// payload already known to be malformed. Translations carry no taxonomy.
+	if len(problems) == 0 && subType != "translation" {
 		taxProblems, err := checkTaxonomy(ctx, s, p)
 		if err != nil {
 			return err
@@ -115,6 +138,58 @@ func validatePayloadFields(ctx context.Context, s *store.Store, subType string, 
 	// fixing three mistakes discovers them one round trip at a time.
 	sort.Strings(problems)
 	return huma.Error422UnprocessableEntity(strings.Join(problems, "; "))
+}
+
+// checkProvenance validates the fields that are published as-is alongside the
+// content: where it came from and under what terms.
+//
+// The licence matters most. The catalog is republished under CC0 (DATA_LICENSE),
+// so a revision declaring CC-BY-SA or "all rights reserved" would make that
+// grant false for the exercise carrying it. It is checked against the same
+// list image uploads use, and blank means "not stated".
+func checkProvenance(p exercisePayload) []string {
+	var problems []string
+
+	if p.License != nil && strings.TrimSpace(*p.License) != "" && !acceptedLicenses[*p.License] {
+		problems = append(problems, fmt.Sprintf(
+			"license %q is not accepted; the catalog is CC0, so only CC0-1.0 or Unlicense can be republished", *p.License))
+	}
+
+	if p.SourceURL != nil && strings.TrimSpace(*p.SourceURL) != "" {
+		if msg := checkSourceURL(*p.SourceURL); msg != "" {
+			problems = append(problems, msg)
+		}
+	}
+
+	if p.AttributionText != nil && utf8.RuneCountInString(*p.AttributionText) > maxAttributionLen {
+		problems = append(problems, fmt.Sprintf("attribution_text is %d characters; the limit is %d",
+			utf8.RuneCountInString(*p.AttributionText), maxAttributionLen))
+	}
+	if p.ChangeSummary != nil && utf8.RuneCountInString(*p.ChangeSummary) > maxChangeSummaryLen {
+		problems = append(problems, fmt.Sprintf("change_summary is %d characters; the limit is %d",
+			utf8.RuneCountInString(*p.ChangeSummary), maxChangeSummaryLen))
+	}
+	return problems
+}
+
+// checkSourceURL returns a problem description for a source_url that is not an
+// absolute https URL, or "".
+//
+// https only: the value is rendered as a link in clients, so javascript:,
+// data: and file: must not get through, and plain http is refused so a
+// provenance link cannot be silently swapped in transit.
+func checkSourceURL(raw string) string {
+	if len(raw) > maxSourceURLLen {
+		return fmt.Sprintf("source_url is %d characters; the limit is %d", len(raw), maxSourceURLLen)
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+		return "source_url must be an absolute https URL"
+	}
+	if u.User != nil {
+		return "source_url must not contain credentials"
+	}
+	return ""
 }
 
 // checkStrings validates a string array field.

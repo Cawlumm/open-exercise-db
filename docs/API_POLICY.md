@@ -488,7 +488,7 @@ Notes:
 - `backend/internal/ratelimit` — the token-bucket limiter itself (package doc has the full
   per-instance-vs-global honesty discussion).
 - `backend/internal/api/ratelimit.go` — the HTTP-layer middleware: client-IP extraction
-  (honoring Cloudflare's `CF-Connecting-IP`), the `User-Agent` policy, and the `429` response.
+  (per `TRUSTED_PROXY_MODE`, see `docs/DEPLOYMENT.md`; `CF-Connecting-IP` is believed only in `cloudflare` mode), the `User-Agent` policy, and the `429` response.
 - `backend/internal/config` (`RateLimitConfig`) — every tier's rate and burst is configurable
   per environment via env vars (`OEDB_RATELIMIT_*`), so a staging/CI instance can run with much
   lower values than production without a code change.

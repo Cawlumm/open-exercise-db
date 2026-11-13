@@ -211,7 +211,7 @@ func registerModerationRoutes(hapi huma.API, s *store.Store, invalidatePublished
 			}
 			if err == nil {
 				out.Body.HasCurrent = true
-				out.Body.Diff = diffAgainstCurrent(current, sub.Payload)
+				out.Body.Diff = diffAgainstCurrent(current, sub.Payload, sub.ImageUploadIDs)
 			}
 		}
 		return out, nil
@@ -409,55 +409,58 @@ func toQueued(s model.Submission) QueuedSubmission {
 	}
 }
 
-// diffAgainstCurrent reports which fields a submission would change.
+// diffAgainstCurrent reports every stored field that approving a submission
+// would change.
 //
-// Only fields the payload actually carries are compared. A payload omitting
-// `level` is proposing nothing about level, and showing it as "level: beginner
-// → null" would invent a change the submitter never made — which is worse than
-// no diff at all, because a moderator would reject a good edit over it.
-func diffAgainstCurrent(current model.Exercise, payload json.RawMessage) []FieldDiff {
-	var proposed map[string]any
-	if err := json.Unmarshal(payload, &proposed); err != nil {
-		return []FieldDiff{}
-	}
-
+// Computed from store.MergeEdit, the same function approval uses, so the diff
+// cannot disagree with what gets published. It therefore covers everything a
+// revision stores — image ids, license, attribution_text, source_url and
+// change_summary as well as the content fields — and a field the payload does
+// not mention is merged to its current value and never shows up. A payload
+// omitting `level` is proposing nothing about level, and showing it as
+// "level: beginner → null" would invent a change the submitter never made.
+func diffAgainstCurrent(current model.Exercise, payload json.RawMessage, imageUploadIDs []string) []FieldDiff {
 	// The content lives on the current revision, not the exercise row: an
 	// exercise is an identity plus a pointer at whichever revision is live.
 	rev := current.CurrentRevision
 	if rev == nil {
 		return []FieldDiff{}
 	}
-	currentByField := map[string]any{
-		"name":              rev.Name,
-		"muscle_group":      rev.MuscleGroup,
-		"category":          rev.Category,
-		"equipment":         rev.Equipment,
-		"instructions":      rev.Instructions,
-		"aliases":           rev.Aliases,
-		"secondary_muscles": rev.SecondaryMuscles,
-		"mechanic":          derefStr(rev.Mechanic),
-		"force":             derefStr(rev.Force),
-		"level":             derefStr(rev.Level),
+	merged, err := store.MergeEdit(*rev, payload, imageUploadIDs)
+	if err != nil {
+		return []FieldDiff{}
 	}
 
 	// Stable order, so a moderator reading two diffs is comparing the same
 	// shape rather than whatever order a map iterated in.
-	order := []string{
-		"name", "muscle_group", "category", "equipment", "mechanic", "force",
-		"level", "instructions", "aliases", "secondary_muscles",
+	fields := []struct {
+		name     string
+		current  any
+		proposed any
+	}{
+		{"name", rev.Name, merged.Name},
+		{"muscle_group", rev.MuscleGroup, merged.MuscleGroup},
+		{"category", rev.Category, merged.Category},
+		{"equipment", rev.Equipment, merged.Equipment},
+		{"mechanic", derefStr(rev.Mechanic), derefStr(merged.Mechanic)},
+		{"force", derefStr(rev.Force), derefStr(merged.Force)},
+		{"level", derefStr(rev.Level), derefStr(merged.Level)},
+		{"instructions", rev.Instructions, merged.Instructions},
+		{"aliases", rev.Aliases, merged.Aliases},
+		{"secondary_muscles", rev.SecondaryMuscles, merged.SecondaryMuscles},
+		{"image_ids", rev.ImageIDs, merged.ImageIDs},
+		{"license", derefStr(rev.License), derefStr(merged.License)},
+		{"attribution_text", derefStr(rev.AttributionText), derefStr(merged.AttributionText)},
+		{"source_url", derefStr(rev.SourceURL), derefStr(merged.SourceURL)},
+		{"change_summary", derefStr(rev.ChangeSummary), derefStr(merged.ChangeSummary)},
 	}
 
 	out := []FieldDiff{}
-	for _, field := range order {
-		p, sent := proposed[field]
-		if !sent {
+	for _, f := range fields {
+		if sameJSON(f.current, f.proposed) {
 			continue
 		}
-		c := currentByField[field]
-		if sameJSON(c, p) {
-			continue
-		}
-		out = append(out, FieldDiff{Field: field, Current: c, Proposed: p})
+		out = append(out, FieldDiff{Field: f.name, Current: f.current, Proposed: f.proposed})
 	}
 	return out
 }

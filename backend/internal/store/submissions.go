@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Cawlumm/open-exercise-db/internal/model"
@@ -60,6 +62,17 @@ type CreateAppSubmissionInput struct {
 // a runtime check inside this package rather than something the caller cannot
 // express wrongly.
 func (s *SubmissionStore) CreateAppSubmission(ctx context.Context, in CreateAppSubmissionInput) (model.Submission, error) {
+	return insertAppSubmission(ctx, s.pool, in)
+}
+
+// queryRower is what a pool and a transaction have in common.
+type queryRower interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// insertAppSubmission is the INSERT shared by the plain and the cap-checked
+// paths, over a pool or a transaction.
+func insertAppSubmission(ctx context.Context, q queryRower, in CreateAppSubmissionInput) (model.Submission, error) {
 	// $7::uuid[] is load-bearing. Without it Postgres infers the COALESCE from
 	// the untyped '{}' literal, decides the whole expression is text, and
 	// rejects the insert against a uuid[] column — at runtime, on the one path
@@ -69,11 +82,57 @@ func (s *SubmissionStore) CreateAppSubmission(ctx context.Context, in CreateAppS
 		VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::uuid[], '{}'))
 		RETURNING %s`, submissionColumns)
 
-	sub, err := scanSubmission(s.pool.QueryRow(ctx, query,
+	sub, err := scanSubmission(q.QueryRow(ctx, query,
 		in.Type, in.TargetExerciseID, in.Locale, []byte(in.Payload), in.AppID, in.AppUserRef, in.ImageUploadIDs,
 	))
 	if err != nil {
 		return model.Submission{}, fmt.Errorf("create submission for app %s: %w", in.AppID, err)
+	}
+	return sub, nil
+}
+
+// CreateAppSubmissionWithinCaps counts the app's usage and inserts the
+// submission as one serialized step, calling admit with the usage in between.
+//
+// Counting and inserting as separate statements is a check-then-act race: N
+// requests arriving together all read the same count, all pass, and all
+// insert, so an app at its cap can overshoot it by its own concurrency. The
+// per-app advisory lock makes the count and the insert atomic with respect to
+// other submissions from the same app (other apps are unaffected), and it is
+// transaction-scoped so a crash or an early return cannot leak it. Under READ
+// COMMITTED the count taken after the lock sees every earlier holder's commit.
+//
+// If admit returns an error nothing is inserted and that error is returned
+// unwrapped, so the caller can tell a refusal from a failure.
+func (s *SubmissionStore) CreateAppSubmissionWithinCaps(ctx context.Context, in CreateAppSubmissionInput, window time.Duration, admit func(AppUsage) error) (model.Submission, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return model.Submission{}, fmt.Errorf("begin submission tx for app %s: %w", in.AppID, err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op once committed
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, in.AppID); err != nil {
+		return model.Submission{}, fmt.Errorf("lock app %s: %w", in.AppID, err)
+	}
+
+	ref := ""
+	if in.AppUserRef != nil {
+		ref = *in.AppUserRef
+	}
+	usage, err := usageFor(ctx, tx, in.AppID, ref, window)
+	if err != nil {
+		return model.Submission{}, err
+	}
+	if err := admit(usage); err != nil {
+		return model.Submission{}, err
+	}
+
+	sub, err := insertAppSubmission(ctx, tx, in)
+	if err != nil {
+		return model.Submission{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return model.Submission{}, fmt.Errorf("commit submission for app %s: %w", in.AppID, err)
 	}
 	return sub, nil
 }

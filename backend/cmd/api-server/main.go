@@ -89,6 +89,14 @@ func main() {
 		log.Printf("config warning: %s", w)
 	}
 
+	if admins, err := stores.Users.AdminGitHubIDs(ctx); err != nil {
+		log.Printf("config warning: list admins: %v", err)
+	} else {
+		for _, w := range cfg.AdminWarnings(admins) {
+			log.Printf("config warning: %s", w)
+		}
+	}
+
 	// exportCache is constructed here, not inside internal/api, per
 	// docs/CONVENTIONS.md section 2's DI pattern — same shape as mediaStore
 	// above. It's owned by main so a future Phase 2 wiring (e.g. calling
@@ -143,7 +151,9 @@ func main() {
 	// refuses to start over a feature they may not want.
 	authCfg := api.AuthConfig{
 		JWTSecret:         cfg.JWTSecret,
+		AdminGitHubIDs:    cfg.AdminGitHubIDs,
 		AdminGitHubLogins: cfg.AdminGitHubLogins,
+		TrustedProxyMode:  cfg.TrustedProxyMode,
 		GitHubOAuth: auth.GitHubOAuth{
 			ClientID:     cfg.GitHubClientID,
 			ClientSecret: cfg.GitHubClientSecret,
@@ -172,7 +182,7 @@ func main() {
 		// final body — including the problem+json ProblemErrors substitutes for
 		// ServeMux's plain-text errors — while CORS headers stay plainly
 		// readable on the wire whatever encoding the body ends up in.
-		Handler: api.CORS(api.Compress(api.ProblemErrors(mux))),
+		Handler: api.CORS(api.Compress(api.LimitUploadBody(api.ProblemErrors(mux)))),
 
 		// Without these, a connection that opens and then dribbles its
 		// request line one byte per minute holds a goroutine and a file

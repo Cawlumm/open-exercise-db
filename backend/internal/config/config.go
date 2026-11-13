@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config holds every runtime setting. Populated once at startup and passed
@@ -25,7 +26,18 @@ type Config struct {
 	// than the operator.
 	GitHubRedirectURL string
 	JWTSecret         string
+	// AdminGitHubIDs is ADMIN_GITHUB_IDS, comma-separated numeric GitHub user
+	// ids. Authoritative when set: members are promoted at sign-in and admins
+	// not listed are demoted.
+	AdminGitHubIDs string
+	// AdminGitHubLogins is ADMIN_GITHUB_LOGINS. Deprecated: usernames are
+	// renameable. Ignored when AdminGitHubIDs is set.
 	AdminGitHubLogins string
+
+	// TrustedProxyMode says which proxy in front of the process, if any, may be
+	// believed about the client's address: ProxyCloudRun, ProxyCloudflare or
+	// ProxyDirect. See DefaultTrustedProxyMode and docs/DEPLOYMENT.md.
+	TrustedProxyMode string
 
 	// Cloudflare R2 object storage (Phase 2).
 	R2AccountID       string
@@ -138,7 +150,9 @@ func Load() Config {
 		GitHubClientSecret: os.Getenv("GITHUB_OAUTH_CLIENT_SECRET"),
 		GitHubRedirectURL:  os.Getenv("GITHUB_OAUTH_REDIRECT_URL"),
 		JWTSecret:          os.Getenv("JWT_SECRET"),
+		AdminGitHubIDs:     os.Getenv("ADMIN_GITHUB_IDS"),
 		AdminGitHubLogins:  os.Getenv("ADMIN_GITHUB_LOGINS"),
+		TrustedProxyMode:   strings.ToLower(strings.TrimSpace(getEnv("TRUSTED_PROXY_MODE", DefaultTrustedProxyMode()))),
 
 		R2AccountID:       os.Getenv("R2_ACCOUNT_ID"),
 		R2AccessKeyID:     os.Getenv("R2_ACCESS_KEY_ID"),
@@ -197,6 +211,61 @@ func Load() Config {
 	}
 }
 
+// Values of TRUSTED_PROXY_MODE.
+const (
+	// ProxyDirect trusts no forwarding header: the TCP peer is the client.
+	ProxyDirect = "direct"
+	// ProxyCloudRun trusts the right-most X-Forwarded-For entry, the one Google's
+	// front end appends. Everything to its left is client-supplied.
+	ProxyCloudRun = "cloudrun"
+	// ProxyCloudflare trusts CF-Connecting-IP. Only correct when Cloudflare is
+	// the sole path to the origin; otherwise any client can set it.
+	ProxyCloudflare = "cloudflare"
+)
+
+// LoginPromotionSunset is the instant after which ADMIN_GITHUB_LOGINS no longer
+// promotes anyone. A login is renameable and can be re-registered by someone
+// else, so it is a standing way to become admin until the operator moves to
+// ADMIN_GITHUB_IDS; a date makes "later" finite.
+var LoginPromotionSunset = time.Date(2027, time.March, 1, 0, 0, 0, 0, time.UTC)
+
+// LoginPromotionAllowed reports whether login-based admin promotion still
+// applies at now.
+func LoginPromotionAllowed(now time.Time) bool { return now.Before(LoginPromotionSunset) }
+
+// DefaultTrustedProxyMode is cloudrun when K_SERVICE is set (Cloud Run sets it on
+// every revision) and direct everywhere else, so no deployment trusts a header
+// it has not been told to.
+func DefaultTrustedProxyMode() string {
+	if os.Getenv("K_SERVICE") != "" {
+		return ProxyCloudRun
+	}
+	return ProxyDirect
+}
+
+// AdminWarnings compares the admins already in the database (their github_id)
+// with ADMIN_GITHUB_IDS. An authoritative list that omits a current admin
+// demotes them at their next sign-in, which is what a mistyped id looks like
+// from the outside, so the operator is told at startup while they can still fix it.
+func (c Config) AdminWarnings(current []string) []string {
+	listed := map[string]bool{}
+	for _, id := range strings.Split(c.AdminGitHubIDs, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			listed[id] = true
+		}
+	}
+	if len(listed) == 0 {
+		return nil
+	}
+	var out []string
+	for _, id := range current {
+		if !listed[id] {
+			out = append(out, fmt.Sprintf("current admin with github_id %s is not in ADMIN_GITHUB_IDS and will be demoted at next sign-in (the last remaining admin is never demoted)", id))
+		}
+	}
+	return out
+}
+
 // UsesR2 reports whether the R2 object-storage backend is fully configured.
 // Mirrors internal/media.NewStore's own all-four-or-none rule; a partial
 // configuration reports false here but is a hard error there, so callers
@@ -216,15 +285,28 @@ const PlaceholderJWTSecret = "change-me-to-a-long-random-string"
 const MinJWTSecretBytes = 32
 
 // Validate returns a fatal configuration error, for the caller to refuse to
-// start on. Outside ENV=development/test a set JWT_SECRET must not be the
-// published placeholder: anyone could forge session tokens with it. An unset
+// start on. In every ENV except test a set JWT_SECRET must not be the
+// published placeholder: anyone could forge session tokens with it, and
+// ENV defaults to development, so exempting it there left the shipped compose
+// file running with a public signing key. An unset
 // secret is allowed: it disables user sign-in entirely (internal/api/auth.go),
 // so there is nothing to forge.
 func (c Config) Validate() error {
-	if c.Env == "development" || c.Env == "test" || c.JWTSecret == "" {
+	for _, id := range strings.Split(c.AdminGitHubIDs, ",") {
+		if id = strings.TrimSpace(id); id != "" && !isDigits(id) {
+			return fmt.Errorf("ADMIN_GITHUB_IDS entry %q is not a numeric GitHub user id (find yours at https://api.github.com/users/<login>)", id)
+		}
+	}
+	switch c.TrustedProxyMode {
+	case "", ProxyDirect, ProxyCloudRun, ProxyCloudflare:
+	default:
+		return fmt.Errorf("TRUSTED_PROXY_MODE=%q is not one of %s, %s, %s",
+			c.TrustedProxyMode, ProxyDirect, ProxyCloudRun, ProxyCloudflare)
+	}
+	if c.JWTSecret == "" {
 		return nil
 	}
-	if c.JWTSecret == PlaceholderJWTSecret {
+	if c.JWTSecret == PlaceholderJWTSecret && c.Env != "test" {
 		return fmt.Errorf("JWT_SECRET is the placeholder from .env.example; generate a real one (e.g. openssl rand -hex 32)")
 	}
 	return nil
@@ -253,6 +335,23 @@ func (c Config) Validate() error {
 // an operator who sees neither warning knows the two settings agree.
 func (c Config) Warnings() []string {
 	var out []string
+
+	if strings.TrimSpace(c.AdminGitHubLogins) != "" {
+		if strings.TrimSpace(c.AdminGitHubIDs) != "" {
+			out = append(out, "ADMIN_GITHUB_LOGINS is deprecated and is ignored because ADMIN_GITHUB_IDS is set; remove it")
+		} else {
+			out = append(out, fmt.Sprintf("ADMIN_GITHUB_LOGINS is deprecated: usernames can be renamed and re-registered, and it stops promoting anyone on %s. Set ADMIN_GITHUB_IDS to numeric GitHub user ids instead", LoginPromotionSunset.Format("2006-01-02")))
+		}
+	}
+
+	// direct is the default, and behind a reverse proxy it buckets every client
+	// on the proxy's address, so one busy client rate-limits the whole install.
+	// This process cannot tell a proxy from a client, so it says so rather than
+	// guessing.
+	if c.Env != "" && c.Env != "development" && c.Env != "test" &&
+		(c.TrustedProxyMode == "" || c.TrustedProxyMode == ProxyDirect) {
+		out = append(out, "TRUSTED_PROXY_MODE is direct, so every request is rate-limited by its TCP peer address. If a reverse proxy, load balancer or CDN sits in front of this process, all clients share one bucket; set TRUSTED_PROXY_MODE (cloudrun or cloudflare) to match it. Ignore this if clients connect directly")
+	}
 
 	// A short JWT_SECRET warns rather than refuses so that adding this check can
 	// never take an existing deployment down; a random secret of any reasonable
@@ -350,6 +449,15 @@ func (c Config) incompleteOAuth() []string {
 // genuinely broken process environment), in which case dir is returned
 // unresolved rather than failing startup outright — main logs whatever this
 // returns, so even that degraded case is visible rather than silent.
+func isDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
 func resolveMediaDir(dir string) string {
 	abs, err := filepath.Abs(dir)
 	if err != nil {

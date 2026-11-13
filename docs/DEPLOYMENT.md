@@ -639,7 +639,7 @@ look like a broken deployment.
    Confirms Cloud Run is neither stripping nor double-encoding.
 8. **Rate limiting survives the proxy** — 30 rapid requests should give 200s then 429s, with
    `RateLimit-Remaining` decrementing across them. If it never decrements, `clientKey` is
-   bucketing every request separately.
+   bucketing every request separately (check `TRUSTED_PROXY_MODE` resolved to `cloudrun`).
 9. **Cold start** — wait 20 minutes, then `time g "$URL/health"`. This is the worst case:
    Cloud Run cold start only — the database is always-on, so it no longer contributes a wake.
    Expect well under a second of database time.
@@ -728,16 +728,41 @@ only a custom domain attached to the R2 bucket and the variable added to `--set-
 not shortcut it with the `*.r2.dev` subdomain: Cloudflare rate-limits it and documents it as
 development-only, as `.env.example` already notes.
 
-**Client IP is trusted from an untrusted header.** `clientKey`
-(`internal/api/ratelimit.go`) reads `CF-Connecting-IP` first and unconditionally, with no
-trusted-proxy check. Any client reaching the origin directly can send a random value per
-request and get a fresh bucket every time. Note that reordering the headers fixes nothing: on
-Cloud Run, `X-Forwarded-For` is *appended* to whatever the client sent, so the first element is
-client-controlled too. The real fix is a deliberate trusted-proxy design, and it only becomes
-meaningful once there is an actual proxy in front to trust. Meanwhile the exposure is bounded
-— buckets are per-instance, evicted after 10 minutes idle, and `--max-instances=4` caps the
-blast radius — and `internal/ratelimit`'s package documentation is already candid that the
-origin limiter is a backstop rather than the enforcement point.
+**Client IP depends on `TRUSTED_PROXY_MODE`.** `clientKey` (`internal/api/clientip.go`)
+buckets the rate limiter on the client address, and which header may be believed depends on
+what is in front of the process:
+
+| `TRUSTED_PROXY_MODE` | Believed | Default when |
+|---|---|---|
+| `cloudrun` | the **right-most** `X-Forwarded-For` entry, which Google's front end appends | `K_SERVICE` is set (always, on Cloud Run) |
+| `cloudflare` | `CF-Connecting-IP` only | never; set it only when Cloudflare is the sole way to reach the origin |
+| `direct` | nothing; the TCP peer address | otherwise |
+
+Everything left of the right-most `X-Forwarded-For` entry is client-supplied, and
+`CF-Connecting-IP` is ignored outside `cloudflare` mode, so neither buys a fresh bucket. A value
+that is not a literal IP falls back to the TCP peer. An unrecognised mode refuses to start.
+Production runs on Cloud Run with no CDN in front, so it uses the `cloudrun` default; switch to
+`cloudflare` only together with the edge proxy described below. Buckets remain per-instance and
+`--max-instances=4` still bounds the blast radius; the origin limiter is a backstop.
+
+Forged app credentials are bounded by the per-address flood guard that runs before
+authentication. An unknown `key_id` is also remembered for 30 seconds, but that only saves the
+query when the same id repeats; a fresh random id each request still costs one indexed lookup
+until the flood guard answers 429.
+
+**Upgrading from a release without `TRUSTED_PROXY_MODE`.** The default is now `direct`, which
+buckets every client on the TCP peer. Behind nginx, Traefik, a compose proxy or any load balancer
+that peer is the proxy, so all clients share one bucket and the whole install gets 429 once the
+aggregate limit is hit. Outside Cloud Run, a non-development `ENV` logs a startup warning while the
+mode is `direct`. Set the mode to match what is in front: `cloudrun` only when Google's front end
+is the last hop (behind your own global load balancer or Cloudflare the right-most entry is that
+hop, not the client, so the same collapse happens), `cloudflare` only when Cloudflare is the sole
+path to the origin.
+
+**Admin list.** `ADMIN_GITHUB_LOGINS` stops promoting anyone on 2027-03-01 (startup logs the
+date); move to `ADMIN_GITHUB_IDS` before then. At startup, any current admin missing from
+`ADMIN_GITHUB_IDS` is logged, and the last remaining admin is never demoted, so a mistyped id
+cannot lock everyone out.
 
 **No Cloudflare in front.** `docs/DESIGN.md` calls for an edge cache ahead of the Cloud Run
 origin, which is also where the real rate limiting in `docs/API_POLICY.md` is meant to live.

@@ -222,8 +222,14 @@ type AppUsage struct {
 // would defeat the index for every caller, including the ones that do pass a
 // ref.
 func (s *AppStore) UsageFor(ctx context.Context, appID, appUserRef string, window time.Duration) (AppUsage, error) {
+	return usageFor(ctx, s.pool, appID, appUserRef, window)
+}
+
+// usageFor is UsageFor over any connection, so the cap check can run inside
+// the transaction that holds the app's lock.
+func usageFor(ctx context.Context, q queryRower, appID, appUserRef string, window time.Duration) (AppUsage, error) {
 	var u AppUsage
-	err := s.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		SELECT
 			(SELECT count(*) FROM submissions
 			  WHERE submitted_by_app = $1 AND status = 'pending'),

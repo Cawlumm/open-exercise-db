@@ -3,6 +3,7 @@ package config_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Cawlumm/open-exercise-db/internal/config"
 )
@@ -119,7 +120,9 @@ func TestValidate_JWTSecret(t *testing.T) {
 		{"production exact minimum", "production", long, false},
 		{"production unset disables sign-in", "production", "", false},
 		{"staging placeholder", "staging", config.PlaceholderJWTSecret, true},
-		{"development placeholder", "development", config.PlaceholderJWTSecret, false},
+		{"development placeholder", "development", config.PlaceholderJWTSecret, true},
+		{"empty env placeholder", "", config.PlaceholderJWTSecret, true},
+		{"test placeholder", "test", config.PlaceholderJWTSecret, false},
 		{"test short", "test", "abc", false},
 	}
 	for _, tc := range cases {
@@ -152,5 +155,101 @@ func TestWarnings_ShortJWTSecret(t *testing.T) {
 		if jwtWarning(c) {
 			t.Errorf("JWT_SECRET warning for env %q with a %d-byte secret, want none", c.Env, len(c.JWTSecret))
 		}
+	}
+}
+
+func TestTrustedProxyMode(t *testing.T) {
+	t.Setenv("TRUSTED_PROXY_MODE", "")
+	t.Setenv("K_SERVICE", "")
+	if got := config.Load().TrustedProxyMode; got != config.ProxyDirect {
+		t.Errorf("default off Cloud Run = %q, want direct", got)
+	}
+	t.Setenv("K_SERVICE", "oedb-api")
+	if got := config.Load().TrustedProxyMode; got != config.ProxyCloudRun {
+		t.Errorf("default on Cloud Run = %q, want cloudrun", got)
+	}
+	t.Setenv("TRUSTED_PROXY_MODE", " Cloudflare ")
+	if got := config.Load().TrustedProxyMode; got != config.ProxyCloudflare {
+		t.Errorf("explicit mode = %q, want cloudflare", got)
+	}
+	if err := (config.Config{Env: "development", TrustedProxyMode: "bogus"}).Validate(); err == nil {
+		t.Error("Validate accepted an unknown TRUSTED_PROXY_MODE")
+	}
+}
+
+func TestAdminGitHubIDs(t *testing.T) {
+	if err := (config.Config{AdminGitHubIDs: "123, 456"}).Validate(); err != nil {
+		t.Errorf("numeric ids rejected: %v", err)
+	}
+	for _, bad := range []string{"octocat", "123,abc", "12 3", "-5"} {
+		if err := (config.Config{AdminGitHubIDs: bad}).Validate(); err == nil {
+			t.Errorf("Validate accepted ADMIN_GITHUB_IDS=%q", bad)
+		}
+	}
+	has := func(c config.Config, sub string) bool {
+		for _, w := range c.Warnings() {
+			if strings.Contains(w, sub) {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(config.Config{AdminGitHubLogins: "a"}, "ADMIN_GITHUB_LOGINS is deprecated:") {
+		t.Error("no deprecation warning for logins alone")
+	}
+	if !has(config.Config{AdminGitHubLogins: "a", AdminGitHubIDs: "1"}, "is ignored because ADMIN_GITHUB_IDS is set") {
+		t.Error("no ignored warning when both are set")
+	}
+	if has(config.Config{AdminGitHubIDs: "1"}, "deprecated") {
+		t.Error("warned with only ids set")
+	}
+}
+
+func TestWarnings_DirectModeInProductionWarns(t *testing.T) {
+	cases := map[string]struct {
+		c    config.Config
+		warn bool
+	}{
+		"production direct":     {config.Config{Env: "production", TrustedProxyMode: config.ProxyDirect}, true},
+		"production unset mode": {config.Config{Env: "production"}, true},
+		"production cloudrun":   {config.Config{Env: "production", TrustedProxyMode: config.ProxyCloudRun}, false},
+		"production cloudflare": {config.Config{Env: "production", TrustedProxyMode: config.ProxyCloudflare}, false},
+		"development direct":    {config.Config{Env: "development", TrustedProxyMode: config.ProxyDirect}, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := false
+			for _, w := range tc.c.Warnings() {
+				if strings.Contains(w, "TRUSTED_PROXY_MODE") {
+					got = true
+				}
+			}
+			if got != tc.warn {
+				t.Errorf("proxy warning = %v, want %v (%v)", got, tc.warn, tc.c.Warnings())
+			}
+		})
+	}
+}
+
+func TestAdminWarnings(t *testing.T) {
+	c := config.Config{AdminGitHubIDs: "1, 2"}
+	if w := c.AdminWarnings([]string{"1", "2"}); len(w) != 0 {
+		t.Errorf("listed admins warned: %v", w)
+	}
+	w := c.AdminWarnings([]string{"1", "99"})
+	if len(w) != 1 || !strings.Contains(w[0], "99") {
+		t.Errorf("warnings = %v, want one naming 99", w)
+	}
+	if w := (config.Config{}).AdminWarnings([]string{"99"}); len(w) != 0 {
+		t.Errorf("no authoritative list must not warn: %v", w)
+	}
+}
+
+func TestLoginPromotionAllowed(t *testing.T) {
+	if !config.LoginPromotionAllowed(config.LoginPromotionSunset.Add(-time.Second)) {
+		t.Error("promotion refused before the sunset")
+	}
+	if config.LoginPromotionAllowed(config.LoginPromotionSunset) {
+		t.Error("promotion allowed at the sunset")
 	}
 }
