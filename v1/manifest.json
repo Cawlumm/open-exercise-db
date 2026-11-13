@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-11-13T13:51:02Z",
+  "published_at": "2026-11-13T13:51:02Z",
+  "source": "https://oedb-api-o4dqddih5q-uk.a.run.app",
+  "locales": [
+    {
+      "code": "en",
+      "file": "exercises.en.b2e72a32b489cd14.json",
+      "total": 873,
+      "sha256": "b2e72a32b489cd141355ece09e6b0e9a4f830484c3e8e029eabc1b15f9b9a970"
+    },
+    {
+      "code": "es",
+      "file": "exercises.es.e7b79c1974b4dbb7.json",
+      "total": 873,
+      "sha256": "e7b79c1974b4dbb7c0b0cd56945058d30baba8dcd6ccf0579762726094fa9924"
+    }
+  ]
+}
