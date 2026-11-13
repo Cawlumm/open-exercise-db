@@ -143,6 +143,7 @@ func main() {
 	// refuses to start over a feature they may not want.
 	authCfg := api.AuthConfig{
 		JWTSecret:         cfg.JWTSecret,
+		AdminGitHubIDs:    cfg.AdminGitHubIDs,
 		AdminGitHubLogins: cfg.AdminGitHubLogins,
 		TrustedProxyMode:  cfg.TrustedProxyMode,
 		GitHubOAuth: auth.GitHubOAuth{

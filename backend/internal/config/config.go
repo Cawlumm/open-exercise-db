@@ -25,6 +25,12 @@ type Config struct {
 	// than the operator.
 	GitHubRedirectURL string
 	JWTSecret         string
+	// AdminGitHubIDs is ADMIN_GITHUB_IDS, comma-separated numeric GitHub user
+	// ids. Authoritative when set: members are promoted at sign-in and admins
+	// not listed are demoted.
+	AdminGitHubIDs string
+	// AdminGitHubLogins is ADMIN_GITHUB_LOGINS. Deprecated: usernames are
+	// renameable. Ignored when AdminGitHubIDs is set.
 	AdminGitHubLogins string
 
 	// TrustedProxyMode says which proxy in front of the process, if any, may be
@@ -143,6 +149,7 @@ func Load() Config {
 		GitHubClientSecret: os.Getenv("GITHUB_OAUTH_CLIENT_SECRET"),
 		GitHubRedirectURL:  os.Getenv("GITHUB_OAUTH_REDIRECT_URL"),
 		JWTSecret:          os.Getenv("JWT_SECRET"),
+		AdminGitHubIDs:     os.Getenv("ADMIN_GITHUB_IDS"),
 		AdminGitHubLogins:  os.Getenv("ADMIN_GITHUB_LOGINS"),
 		TrustedProxyMode:   strings.ToLower(strings.TrimSpace(getEnv("TRUSTED_PROXY_MODE", DefaultTrustedProxyMode()))),
 
@@ -249,6 +256,11 @@ const MinJWTSecretBytes = 32
 // secret is allowed: it disables user sign-in entirely (internal/api/auth.go),
 // so there is nothing to forge.
 func (c Config) Validate() error {
+	for _, id := range strings.Split(c.AdminGitHubIDs, ",") {
+		if id = strings.TrimSpace(id); id != "" && !isDigits(id) {
+			return fmt.Errorf("ADMIN_GITHUB_IDS entry %q is not a numeric GitHub user id (find yours at https://api.github.com/users/<login>)", id)
+		}
+	}
 	switch c.TrustedProxyMode {
 	case "", ProxyDirect, ProxyCloudRun, ProxyCloudflare:
 	default:
@@ -287,6 +299,14 @@ func (c Config) Validate() error {
 // an operator who sees neither warning knows the two settings agree.
 func (c Config) Warnings() []string {
 	var out []string
+
+	if strings.TrimSpace(c.AdminGitHubLogins) != "" {
+		if strings.TrimSpace(c.AdminGitHubIDs) != "" {
+			out = append(out, "ADMIN_GITHUB_LOGINS is deprecated and is ignored because ADMIN_GITHUB_IDS is set; remove it")
+		} else {
+			out = append(out, "ADMIN_GITHUB_LOGINS is deprecated: usernames can be renamed and re-registered. Set ADMIN_GITHUB_IDS to numeric GitHub user ids instead")
+		}
+	}
 
 	// A short JWT_SECRET warns rather than refuses so that adding this check can
 	// never take an existing deployment down; a random secret of any reasonable
@@ -384,6 +404,15 @@ func (c Config) incompleteOAuth() []string {
 // genuinely broken process environment), in which case dir is returned
 // unresolved rather than failing startup outright — main logs whatever this
 // returns, so even that degraded case is visible rather than silent.
+func isDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
 func resolveMediaDir(dir string) string {
 	abs, err := filepath.Abs(dir)
 	if err != nil {

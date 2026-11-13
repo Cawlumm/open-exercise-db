@@ -82,7 +82,13 @@ type AuthConfig struct {
 	// as though the user did something wrong.
 	GitHubOAuth auth.GitHubOAuth
 
-	// AdminGitHubLogins is the raw ADMIN_GITHUB_LOGINS value. Parsed at
+	// AdminGitHubIDs is the raw ADMIN_GITHUB_IDS value: numeric GitHub user ids.
+	// When non-empty it is the authoritative admin list and AdminGitHubLogins is
+	// ignored. Parsed at sign-in, like the logins, so a change needs no redeploy
+	// of code.
+	AdminGitHubIDs string
+
+	// AdminGitHubLogins is the deprecated ADMIN_GITHUB_LOGINS value. Parsed at
 	// sign-in rather than at startup so changing it takes effect on the next
 	// login without a redeploy — which matters when the reason you are
 	// changing it is that you locked yourself out.

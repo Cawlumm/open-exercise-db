@@ -422,7 +422,7 @@ history) · `/exercises/new` submit form · `/exercises/{slug}/edit` ·
 
 *People* authenticate with **GitHub OAuth** (authorization-code flow, not a full GitHub App) —
 no passwords, appropriate for a dev-heavy early contributor base. Bootstrap the first admin
-via `ADMIN_GITHUB_LOGINS`, auto-promoted on first login.
+via `ADMIN_GITHUB_IDS` (numeric GitHub user ids), promoted at sign-in; the list is authoritative, so an admin not on it is demoted to contributor on their next sign-in.
 
 *Apps* authenticate with **their own credentials** and submit on behalf of their users, who
 have no account here at all. This is Open Food Facts' model, and it exists for a specific

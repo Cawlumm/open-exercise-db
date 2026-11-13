@@ -147,12 +147,23 @@ func registerAuthRoutes(hapi huma.API, s *store.Store, cfg AuthConfig) {
 
 		// Promotion is decided here from configuration and passed to the
 		// store as a boolean, so nothing GitHub returns can influence a role.
-		admins := model.AdminLogins(cfg.AdminGitHubLogins)
+		ghID := githubIDString(ghUser.ID)
+		var promote, demote bool
+		if ids := model.AdminGitHubIDs(cfg.AdminGitHubIDs); len(ids) > 0 {
+			// Authoritative: the id comes from GitHub's own user response, is
+			// immutable, and a user not on the list loses a stale admin role.
+			promote = ids[ghID]
+			demote = !promote
+		} else {
+			// Deprecated fallback; usernames can be renamed and re-registered.
+			promote = model.AdminLogins(cfg.AdminGitHubLogins)[lower(ghUser.Login)]
+		}
 		user, err := s.Users.UpsertGitHubUser(ctx, store.UpsertGitHubUserInput{
-			GitHubID:       githubIDString(ghUser.ID),
+			GitHubID:       ghID,
 			Username:       ghUser.Login,
 			AvatarURL:      avatar,
-			PromoteToAdmin: admins[lower(ghUser.Login)],
+			PromoteToAdmin: promote,
+			DemoteAdmin:    demote,
 		})
 		if err != nil {
 			return nil, mapStoreError(err, "")

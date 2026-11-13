@@ -30,7 +30,8 @@ services:
       - PORT=8080
       - DATABASE_URL=postgres://${POSTGRES_USER:-openexercisedb}:${POSTGRES_PASSWORD:-openexercisedb}@postgres:5432/${POSTGRES_DB:-openexercisedb}?sslmode=disable
       - JWT_SECRET=${JWT_SECRET}
-      - ADMIN_GITHUB_LOGINS=${ADMIN_GITHUB_LOGINS}
+      - ADMIN_GITHUB_IDS=${ADMIN_GITHUB_IDS:-}
+      - ADMIN_GITHUB_LOGINS=${ADMIN_GITHUB_LOGINS:-}
       # Set explicitly rather than leaning on the "./data/media" default
       # resolving against the image's WORKDIR. That coupling is invisible
       # from either file on its own, and it is exactly what has to stay true

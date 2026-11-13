@@ -26,8 +26,13 @@ type UpsertGitHubUserInput struct {
 	Username  string
 	AvatarURL *string
 
-	// PromoteToAdmin comes from model.AdminLogins matching this sign-in.
+	// PromoteToAdmin is true when this sign-in matches the configured admin list.
 	PromoteToAdmin bool
+
+	// DemoteAdmin is set when the admin list is authoritative (ADMIN_GITHUB_IDS)
+	// and this sign-in is not on it: a current admin becomes a contributor.
+	// Moderators are left alone. Ignored when PromoteToAdmin is set.
+	DemoteAdmin bool
 }
 
 // UpsertGitHubUser records a sign-in, creating the user on first login and
@@ -38,24 +43,26 @@ type UpsertGitHubUserInput struct {
 // day they renamed — splitting their submission history and, worse, leaving
 // their old moderator role stranded on an account nobody can log into.
 //
-// Promotion is one-way here: an admin login lifts the role, but a login that
-// is *not* on the list never demotes. Demotion is deliberately a separate
-// deliberate act, because the alternative is that a typo in
-// ADMIN_GITHUB_LOGINS — or a deploy that forgets to set it at all — silently
-// strips admin from everyone the next time they sign in, which is exactly when
-// nobody is watching.
+// Promotion is one-way unless the caller asks otherwise: a sign-in on the list
+// lifts the role, and one that is not on it demotes only when DemoteAdmin is
+// set, which the handler does only when ADMIN_GITHUB_IDS is configured. With no
+// authoritative list a typo in the env var — or a deploy that forgets it —
+// would otherwise strip admin from everyone the next time they sign in, which
+// is exactly when nobody is watching.
 func (s *UserStore) UpsertGitHubUser(ctx context.Context, in UpsertGitHubUserInput) (model.User, error) {
 	query := fmt.Sprintf(`
 		INSERT INTO users (github_id, username, avatar_url, role)
-		VALUES ($1, $2, $3, CASE WHEN $4 THEN 'admin' ELSE 'contributor' END)
+		VALUES ($1, $2, $3, CASE WHEN $4::boolean THEN 'admin' ELSE 'contributor' END)
 		ON CONFLICT (github_id) DO UPDATE
 		SET username   = EXCLUDED.username,
 		    avatar_url = EXCLUDED.avatar_url,
-		    role       = CASE WHEN $4 THEN 'admin' ELSE users.role END
+		    role       = CASE WHEN $4::boolean THEN 'admin'
+		                      WHEN $5::boolean AND users.role = 'admin' THEN 'contributor'
+		                      ELSE users.role END
 		RETURNING %s`, userColumns)
 
 	var u model.User
-	err := s.pool.QueryRow(ctx, query, in.GitHubID, in.Username, in.AvatarURL, in.PromoteToAdmin).Scan(
+	err := s.pool.QueryRow(ctx, query, in.GitHubID, in.Username, in.AvatarURL, in.PromoteToAdmin, in.DemoteAdmin).Scan(
 		&u.ID, &u.GitHubID, &u.Username, &u.AvatarURL, &u.Role, &u.CreatedAt,
 	)
 	if err != nil {

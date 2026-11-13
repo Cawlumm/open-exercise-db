@@ -173,3 +173,31 @@ func TestTrustedProxyMode(t *testing.T) {
 		t.Error("Validate accepted an unknown TRUSTED_PROXY_MODE")
 	}
 }
+
+func TestAdminGitHubIDs(t *testing.T) {
+	if err := (config.Config{AdminGitHubIDs: "123, 456"}).Validate(); err != nil {
+		t.Errorf("numeric ids rejected: %v", err)
+	}
+	for _, bad := range []string{"octocat", "123,abc", "12 3", "-5"} {
+		if err := (config.Config{AdminGitHubIDs: bad}).Validate(); err == nil {
+			t.Errorf("Validate accepted ADMIN_GITHUB_IDS=%q", bad)
+		}
+	}
+	has := func(c config.Config, sub string) bool {
+		for _, w := range c.Warnings() {
+			if strings.Contains(w, sub) {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(config.Config{AdminGitHubLogins: "a"}, "ADMIN_GITHUB_LOGINS is deprecated:") {
+		t.Error("no deprecation warning for logins alone")
+	}
+	if !has(config.Config{AdminGitHubLogins: "a", AdminGitHubIDs: "1"}, "is ignored because ADMIN_GITHUB_IDS is set") {
+		t.Error("no ignored warning when both are set")
+	}
+	if has(config.Config{AdminGitHubIDs: "1"}, "deprecated") {
+		t.Error("warned with only ids set")
+	}
+}

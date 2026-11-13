@@ -56,3 +56,31 @@ func AdminLogins(raw string) map[string]bool {
 	}
 	return out
 }
+
+// AdminGitHubIDs parses ADMIN_GITHUB_IDS — a comma-separated list of numeric
+// GitHub user ids. Unlike a login, an id is permanent: a renamed account keeps
+// it, and a released username cannot be claimed by someone else to inherit
+// admin. Entries that are not plain digits are skipped here; config.Validate
+// rejects them at startup so a typo cannot go unnoticed.
+func AdminGitHubIDs(raw string) map[string]bool {
+	out := map[string]bool{}
+	for _, id := range strings.Split(raw, ",") {
+		if id = strings.TrimSpace(id); isDigitsOnly(id) {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+// isDigitsOnly reports whether s is a non-empty string of ASCII digits.
+func isDigitsOnly(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}

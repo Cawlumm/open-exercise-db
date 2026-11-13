@@ -47,6 +47,11 @@ func fakeGitHub(t *testing.T, login string, id int64) auth.GitHubEndpoints {
 // newSignInAPI wires Register with sign-in configured against a fake GitHub.
 func newSignInAPI(t *testing.T, adminLogins, ghLogin string, ghID int64) (*store.Store, *pgxpool.Pool, humatest.TestAPI) {
 	t.Helper()
+	return newSignInAPIWithAdmins(t, "", adminLogins, ghLogin, ghID)
+}
+
+func newSignInAPIWithAdmins(t *testing.T, adminIDs, adminLogins, ghLogin string, ghID int64) (*store.Store, *pgxpool.Pool, humatest.TestAPI) {
+	t.Helper()
 	s, pool := newTestStore(t)
 
 	limiter := ratelimit.NewLimiter(ratelimit.Config{
@@ -64,6 +69,7 @@ func newSignInAPI(t *testing.T, adminLogins, ghLogin string, ghID int64) (*store
 	_, hapi := humatest.New(t)
 	Register(hapi, s, cache, limiter, mediaStore, "", AuthConfig{
 		JWTSecret:         signInSecret,
+		AdminGitHubIDs:    adminIDs,
 		AdminGitHubLogins: adminLogins,
 		GitHubOAuth: auth.GitHubOAuth{
 			ClientID:     "cid",
@@ -277,4 +283,52 @@ func TestAuth_UserAndAppFailuresAreIndistinguishable(t *testing.T) {
 			t.Errorf("%s produced a distinguishable body:\n got: %s\nwant: %s", name, b, first)
 		}
 	}
+}
+
+func TestSignIn_AdminByNumericID(t *testing.T) {
+	t.Run("listed id is promoted even under a different login", func(t *testing.T) {
+		_, _, api := newSignInAPIWithAdmins(t, "111, 424242", "", "renamed-account", 424242)
+		if _, _, role := signIn(t, api); role != "admin" {
+			t.Fatalf("role = %q, want admin", role)
+		}
+	})
+
+	t.Run("a login on the deprecated list is ignored when ids are set", func(t *testing.T) {
+		_, _, api := newSignInAPIWithAdmins(t, "111", "squatter", "squatter", 999)
+		if _, _, role := signIn(t, api); role != "contributor" {
+			t.Fatalf("role = %q, want contributor", role)
+		}
+	})
+
+	t.Run("an admin not on the list is demoted at sign-in", func(t *testing.T) {
+		s, pool, api := newSignInAPIWithAdmins(t, "111", "", "former-admin", 555)
+		_, userID, _ := signIn(t, api)
+		if _, err := pool.Exec(context.Background(), `UPDATE users SET role = 'admin' WHERE id = $1`, userID); err != nil {
+			t.Fatalf("set admin: %v", err)
+		}
+		if _, _, role := signIn(t, api); role != "contributor" {
+			t.Fatalf("role after re-login = %q, want contributor", role)
+		}
+		if u, err := s.Users.GetByID(context.Background(), userID); err != nil || u.Role != "contributor" {
+			t.Fatalf("stored role = %q (err %v), want contributor", u.Role, err)
+		}
+	})
+
+	t.Run("a moderator not on the list is kept", func(t *testing.T) {
+		_, pool, api := newSignInAPIWithAdmins(t, "111", "", "mod", 556)
+		_, userID, _ := signIn(t, api)
+		if _, err := pool.Exec(context.Background(), `UPDATE users SET role = 'moderator' WHERE id = $1`, userID); err != nil {
+			t.Fatalf("set moderator: %v", err)
+		}
+		if _, _, role := signIn(t, api); role != "moderator" {
+			t.Fatalf("role = %q, want moderator", role)
+		}
+	})
+
+	t.Run("deprecated logins still promote when no ids are set", func(t *testing.T) {
+		_, _, api := newSignInAPIWithAdmins(t, "", "legacy-admin", "legacy-admin", 557)
+		if _, _, role := signIn(t, api); role != "admin" {
+			t.Fatalf("role = %q, want admin", role)
+		}
+	})
 }
