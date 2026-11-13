@@ -169,7 +169,7 @@ func TestHappyPathAndDeterminism(t *testing.T) {
 	for _, n := range listFiles(t, out) {
 		before[n], _ = os.ReadFile(filepath.Join(out, n))
 	}
-	cfg2 := &Config{API: cfg.API, Out: out, Now: func() time.Time { return time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC) }}
+	cfg2 := &Config{API: cfg.API, Out: out, Now: func() time.Time { return time.Date(2026, 1, 2, 4, 0, 0, 0, time.UTC) }}
 	res2, err := Build(context.Background(), cfg2)
 	if err != nil || res2.Changed {
 		t.Fatalf("second run should be unchanged: %v", err)
@@ -312,5 +312,60 @@ func TestUserAgentMatchesAPIPolicy(t *testing.T) {
 	}
 	if UserAgent != "open-exercise-db-snapshot/1 (+https://github.com/Cawlumm/open-exercise-db)" {
 		t.Fatal("UA changed; update the docs")
+	}
+}
+
+func TestPublishedAtHeartbeat(t *testing.T) {
+	out := t.TempDir()
+	f := newAPI()
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	build := func(now time.Time) *Result {
+		t.Helper()
+		res, err := Build(context.Background(), &Config{API: srv.URL, Out: out, Now: func() time.Time { return now }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	read := func() Manifest {
+		var m Manifest
+		b, _ := os.ReadFile(filepath.Join(out, "v1/manifest.json"))
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	if r := build(t0); !r.Changed {
+		t.Fatal("first run must write")
+	}
+	m := read()
+	if m.GeneratedAt != m.PublishedAt || m.PublishedAt != "2026-01-02T03:04:05Z" {
+		t.Fatalf("first run must set both: %+v", m)
+	}
+	before, _ := os.ReadFile(filepath.Join(out, "v1/manifest.json"))
+	if r := build(t0.Add(23 * time.Hour)); r.Changed {
+		t.Fatal("under 24h must be unchanged")
+	}
+	after, _ := os.ReadFile(filepath.Join(out, "v1/manifest.json"))
+	if string(before) != string(after) {
+		t.Fatal("manifest rewritten under 24h")
+	}
+	t1 := t0.Add(25 * time.Hour)
+	if r := build(t1); !r.Changed {
+		t.Fatal("over 24h must bump")
+	}
+	m = read()
+	if m.GeneratedAt != "2026-01-02T03:04:05Z" || m.PublishedAt != t1.Format(time.RFC3339) {
+		t.Fatalf("heartbeat must bump published_at only: %+v", m)
+	}
+	f.en = append(f.en, "d")
+	f.locales["es"] = append(f.locales["es"], "d")
+	t2 := t1.Add(time.Hour)
+	build(t2)
+	m = read()
+	if m.GeneratedAt != t2.Format(time.RFC3339) || m.PublishedAt != m.GeneratedAt {
+		t.Fatalf("content change must bump both: %+v", m)
 	}
 }

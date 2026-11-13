@@ -283,8 +283,11 @@ a mirror, an offline cache — **MUST** read the static snapshot, not the API:
 Try the primary, and use the fallback only if it fails. Both serve the same files from the
 `catalog` branch.
 
-**Format.** The manifest is `{"schema_version":1,"generated_at":"<RFC3339 UTC>","source":"<api base>","locales":[{"code","file","total","sha256"}]}`,
-`en` first. Each `file` is relative to the manifest's directory, named
+**Format.** The manifest is `{"schema_version":1,"generated_at":"<RFC3339 UTC>","published_at":"<RFC3339 UTC>","source":"<api base>","locales":[{"code","file","total","sha256"}]}`,
+`en` first. `generated_at` is the content version: it changes only when some locale file
+changes. `published_at` is freshness: the publisher bumps it at least once a day even when
+nothing changed, so a `published_at` more than a day or so old means the publisher has stopped,
+not that the catalog is quiet. Each `file` is relative to the manifest's directory, named
 `exercises.<locale>.<first 16 hex of sha256>.json`, and holds `{"exercises":[...],"total":N}`:
 the same exercise objects the API returns (for non-`en` locales, as `GET /exercises?locale=X`
 returns them), sorted by `id`. The file name contains its own hash, so a cached manifest can
@@ -292,13 +295,13 @@ never point at the wrong version of a file; `sha256` is over the exact file byte
 `url`s are relative to the API (`/api/v1/images/{id}`), not to the snapshot: images are still
 served by the API.
 
-**Refreshing.** Fetch the manifest with `If-None-Match` (and use `generated_at` to see whether
+**Refreshing.** Fetch the manifest with `If-None-Match` (and compare `generated_at` to see whether
 anything changed), then fetch only the locale files whose `file` you do not already hold.
 Reject a file whose bytes do not match `sha256`. Check that `schema_version` is one you
 understand.
 
-**Cadence.** The snapshot is rebuilt every 6 hours and a new manifest is published only when
-the catalog changed. Polling more often than that gains nothing.
+**Cadence.** The snapshot is rebuilt every 6 hours and the manifest is rewritten when the catalog
+changed, or once a day to refresh `published_at`. Polling more often than that gains nothing.
 
 ## Rate-limit response format
 

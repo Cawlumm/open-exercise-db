@@ -24,6 +24,11 @@ import (
 	"time"
 )
 
+// heartbeatAfter is how stale published_at may get before the manifest is
+// rewritten with a fresh one, so consumers can tell a quiet catalog from a
+// dead publisher.
+const heartbeatAfter = 24 * time.Hour
+
 const (
 	UserAgent         = "open-exercise-db-snapshot/1 (+https://github.com/Cawlumm/open-exercise-db)"
 	DefaultAPI        = "https://oedb-api-o4dqddih5q-uk.a.run.app"
@@ -52,6 +57,7 @@ type Locale struct {
 type Manifest struct {
 	SchemaVersion int      `json:"schema_version"`
 	GeneratedAt   string   `json:"generated_at"`
+	PublishedAt   string   `json:"published_at"`
 	Source        string   `json:"source"`
 	Locales       []Locale `json:"locales"`
 }
@@ -73,6 +79,7 @@ type Config struct {
 type Result struct {
 	Changed     bool
 	GeneratedAt string
+	PublishedAt string
 	Locales     []Locale
 	Bytes       map[string]int
 }
@@ -144,16 +151,22 @@ func Build(ctx context.Context, cfg *Config) (*Result, error) {
 		res.Locales = append(res.Locales, Locale{Code: c.code, File: name, Total: len(c.items), SHA256: hexSum})
 	}
 
+	now := cfg.Now().UTC()
 	old, _ := readManifest(cfg.Out)
+	res.GeneratedAt = now.Format(time.RFC3339)
+	res.PublishedAt = res.GeneratedAt
 	if old != nil && sameShas(old.Locales, res.Locales) {
 		res.GeneratedAt = old.GeneratedAt
 		res.Locales = old.Locales
-		return res, nil
+		pub, perr := time.Parse(time.RFC3339, old.PublishedAt)
+		if perr == nil && now.Sub(pub) <= heartbeatAfter {
+			res.PublishedAt = old.PublishedAt
+			return res, nil
+		}
+		files = nil // data files already published
 	}
-
 	res.Changed = true
-	res.GeneratedAt = cfg.Now().UTC().Format(time.RFC3339)
-	m := Manifest{SchemaVersion: SchemaVersion, GeneratedAt: res.GeneratedAt, Source: cfg.API, Locales: res.Locales}
+	m := Manifest{SchemaVersion: SchemaVersion, GeneratedAt: res.GeneratedAt, PublishedAt: res.PublishedAt, Source: cfg.API, Locales: res.Locales}
 	mb, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("encode manifest: %w", err)
