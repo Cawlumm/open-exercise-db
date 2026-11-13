@@ -651,6 +651,45 @@ look like a broken deployment.
     a keepalive that quietly stopped looks exactly like one that is working, right up until
     the project pauses.
 
+## Static catalog snapshot
+
+`.github/workflows/snapshot.yml` publishes the catalog as static files on the `catalog` branch
+(the GitHub Pages source) so bulk readers never touch the API or the database. It runs every 6
+hours (`17 */6 * * *`) on `main` only, and can be run by hand: Actions, Snapshot, Run workflow.
+
+It reads the public API with `cmd/build-snapshot` (`-api`, `-out`, `-confirm-removals`), so it
+needs no secrets beyond the built-in `GITHUB_TOKEN`. The first run creates the `catalog` branch
+as an orphan; after that, enable Pages from the `catalog` branch root. Files are
+content-addressed and old ones are kept, so `git log catalog` is the archive of every published
+version. A run that finds nothing changed commits nothing.
+
+To try it locally: `cd backend && go run ./cmd/build-snapshot -out /some/dir`; running it twice
+should print `unchanged` the second time.
+
+**It refuses to publish** (the job fails and the live snapshot is untouched) on: any HTTP error
+after retries, a collected count different from the API's `total`, zero exercises, duplicate
+ids, a non-`en` locale whose ids differ from `en`, a locale in the published manifest that is missing
+from the new run, an unreadable existing manifest, or an `en` count under half of what the
+`catalog` branch's manifest records. A failure is retried once over the whole collection first.
+
+**Confirming removals.** If the catalog really did shrink by more than half, or a locale was
+retired on purpose, run the workflow
+manually with `confirm_removals` ticked. Do this only after checking the drop is intended.
+
+**Keeping the schedule alive.** GitHub disables scheduled workflows in a public repository after
+60 days without repository activity. The manifest's `published_at` heartbeat commits to
+`catalog` at least daily, which is expected to count as activity; if it does not, the schedule
+stops quietly. Consumers notice: Lyftr falls back to the API once `published_at` is older than
+48 hours. To check, look at Actions, Snapshot: a disabled workflow shows a banner, and the
+newest commit on `catalog` should be less than a day old. To re-enable, press "Enable
+workflow" there (or `gh workflow enable snapshot.yml`) and run it once by hand.
+
+**Protect the branch.** Add a ruleset on `catalog` that blocks force-push and deletion. Its git
+history is the archive, and the job only ever fast-forwards.
+
+Image bytes still come from the API (`/api/v1/images/{id}`) until `IMAGE_BASE_URL` points at a
+custom domain on the R2 bucket; see [Known gaps](#known-gaps).
+
 ---
 
 ## Known gaps
