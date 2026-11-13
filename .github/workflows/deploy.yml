@@ -48,9 +48,19 @@ jobs:
   deploy:
     name: Build, push, deploy, smoke
     # workflow_run fires on failure and cancellation too, not just success.
+    #
+    # The `branches: [main]` filter above matches the head BRANCH NAME, not where
+    # it lives: a pull request from a fork whose branch happens to be called
+    # `main` triggers this workflow, and this job would then check out the fork's
+    # head_sha with `id-token: write`. So the job itself insists that the CI run
+    # was a push (not a pull_request) to this repository's own main. Dispatch is
+    # exempt; the production environment's branch rule constrains it.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -81,13 +91,13 @@ jobs:
           echo "short=${sha:0:12}" >> "$GITHUB_OUTPUT"
           echo "deploying $sha"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ steps.sha.outputs.full }}
 
       - name: Authenticate to Google Cloud
         id: auth
-        uses: google-github-actions/auth@v3
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           project_id: ${{ env.GCP_PROJECT_ID }}
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
@@ -98,15 +108,15 @@ jobs:
           # gcloud credential helper inside buildx.
           token_format: access_token
 
-      - uses: google-github-actions/setup-gcloud@v3
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.GCP_REGION }}-docker.pkg.dev
           username: oauth2accesstoken
           password: ${{ steps.auth.outputs.access_token }}
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       # Captured BEFORE the deploy so the rollback step below has a concrete
       # revision to shift traffic back to. Empty on the very first deploy, which
@@ -122,7 +132,7 @@ jobs:
           echo "currently serving: ${prev:-<none>}"
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: ./backend
           push: true

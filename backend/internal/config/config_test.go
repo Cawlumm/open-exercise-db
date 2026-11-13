@@ -105,3 +105,29 @@ func TestWarnings_R2WithoutImageBaseURL(t *testing.T) {
 		t.Errorf("warning omits IMAGE_BASE_URL: %q", w[0])
 	}
 }
+
+func TestValidate_JWTSecret(t *testing.T) {
+	long := strings.Repeat("x", config.MinJWTSecretBytes)
+	cases := []struct {
+		name    string
+		env     string
+		secret  string
+		wantErr bool
+	}{
+		{"production placeholder", "production", config.PlaceholderJWTSecret, true},
+		{"production short", "production", strings.Repeat("x", config.MinJWTSecretBytes-1), true},
+		{"production exact minimum", "production", long, false},
+		{"production unset disables sign-in", "production", "", false},
+		{"staging placeholder", "staging", config.PlaceholderJWTSecret, true},
+		{"development placeholder", "development", config.PlaceholderJWTSecret, false},
+		{"test short", "test", "abc", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := config.Config{Env: tc.env, JWTSecret: tc.secret}.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
