@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/text/language"
 
 	"github.com/Cawlumm/open-exercise-db/internal/contract"
 	"github.com/Cawlumm/open-exercise-db/internal/model"
@@ -120,13 +123,11 @@ func registerSubmissionRoutes(hapi huma.API, s *store.Store) {
 		// Field-level validation against the live vocabulary. Structural
 		// checks above only prove the payload is a JSON object; this is what
 		// keeps a muscle group nobody can filter by out of the queue.
-		// Translations are exempt: they carry a name and instructions in
-		// another language, not taxonomy, and running them through the
-		// English vocabulary would reject every one of them.
-		if in.Body.Type != model.SubmissionTypeTranslation {
-			if err := validatePayloadFields(ctx, s, in.Body.Type, in.Body.Payload); err != nil {
-				return nil, err
-			}
+		// Every type goes through it. Translations skip only the taxonomy
+		// check inside — they carry no vocabulary terms — but their name,
+		// aliases and instructions obey the same rules as English content.
+		if err := validatePayloadFields(ctx, s, in.Body.Type, in.Body.Payload); err != nil {
+			return nil, err
 		}
 
 		// A target that does not exist is the caller's mistake, not a server
@@ -146,15 +147,9 @@ func registerSubmissionRoutes(hapi huma.API, s *store.Store) {
 			return nil, err
 		}
 
-		usage, err := s.Apps.UsageFor(ctx, app.ID, derefOr(in.Body.AppUserRef, ""), capWindow)
-		if err != nil {
-			return nil, mapStoreError(err, "")
-		}
-		if err := checkCaps(app, usage); err != nil {
-			return nil, err
-		}
-
-		sub, err := s.Submissions.CreateAppSubmission(ctx, store.CreateAppSubmissionInput{
+		// Counted and inserted in one transaction under the app's lock, so
+		// concurrent requests cannot each read the same count and all pass.
+		sub, err := s.Submissions.CreateAppSubmissionWithinCaps(ctx, store.CreateAppSubmissionInput{
 			Type:             in.Body.Type,
 			TargetExerciseID: in.Body.TargetExerciseID,
 			Locale:           in.Body.Locale,
@@ -162,8 +157,12 @@ func registerSubmissionRoutes(hapi huma.API, s *store.Store) {
 			AppID:            app.ID,
 			AppUserRef:       in.Body.AppUserRef,
 			ImageUploadIDs:   in.Body.ImageUploadIDs,
-		})
+		}, capWindow, func(usage store.AppUsage) error { return checkCaps(app, usage) })
 		if err != nil {
+			var statusErr huma.StatusError
+			if errors.As(err, &statusErr) {
+				return nil, err
+			}
 			return nil, mapStoreError(err, "")
 		}
 
@@ -237,6 +236,20 @@ func validateSubmissionBody(in *CreateSubmissionInput) error {
 	if in.Body.Type == model.SubmissionTypeTranslation && in.Body.Locale == nil {
 		return huma.Error422UnprocessableEntity("locale is required for translation submissions")
 	}
+	if in.Body.Locale != nil {
+		canonical, err := canonicalLocale(*in.Body.Locale)
+		if err != nil {
+			return huma.Error422UnprocessableEntity(err.Error())
+		}
+		// Stored canonical, so "en_us", "EN-us" and "en-US" are one locale
+		// and a translation does not hide under a spelling nothing reads.
+		in.Body.Locale = &canonical
+	}
+	// Postgres text and jsonb cannot hold U+0000; left in, the insert fails
+	// as a 500 for what is the caller's malformed input.
+	if hasNUL(in.Body.AppUserRef) {
+		return huma.Error422UnprocessableEntity("app_user_ref must not contain NUL characters")
+	}
 
 	if len(in.Body.Payload) == 0 {
 		return huma.Error422UnprocessableEntity("payload is required")
@@ -256,7 +269,44 @@ func validateSubmissionBody(in *CreateSubmissionInput) error {
 	if len(probe) == 0 {
 		return huma.Error422UnprocessableEntity("payload must not be empty")
 	}
+	if containsNUL(probe) {
+		return huma.Error422UnprocessableEntity("payload must not contain NUL characters")
+	}
 	return nil
+}
+
+// canonicalLocale parses a BCP 47 tag and returns its canonical form.
+func canonicalLocale(raw string) (string, error) {
+	tag, err := language.Parse(strings.TrimSpace(raw))
+	if err != nil || tag == language.Und {
+		return "", fmt.Errorf("locale %q is not a valid BCP 47 language tag", raw)
+	}
+	return tag.String(), nil
+}
+
+func hasNUL(p *string) bool {
+	return p != nil && strings.ContainsRune(*p, 0)
+}
+
+// containsNUL reports whether any key or string anywhere in a decoded JSON
+// value contains U+0000. Walked on the decoded value rather than by searching
+// the raw bytes: an escaped backslash followed by the text "u0000" is
+// perfectly storable, while the six-character escape for NUL is what Postgres
+// jsonb refuses, and only decoding tells the two apart.
+func containsNUL(v any) bool {
+	switch t := v.(type) {
+	case string:
+		return strings.ContainsRune(t, 0)
+	case []any:
+		return slices.ContainsFunc(t, containsNUL)
+	case map[string]any:
+		for k, e := range t {
+			if strings.ContainsRune(k, 0) || containsNUL(e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // checkCaps refuses a submission that would exceed the app's budget.
