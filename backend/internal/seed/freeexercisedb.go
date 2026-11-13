@@ -396,6 +396,7 @@ func processImages(ctx context.Context, st *store.Store, mediaStore media.Store,
 			// so the rendition's recorded encoding has to describe what is
 			// actually stored, not what was there before it went missing.
 			recordFullVariant(ctx, st, existing.ID, key, encoded, logger, sourceID)
+			recordThumbVariant(ctx, st, mediaStore, existing.ID, key, encoded.Data, logger, sourceID)
 
 			width, height := encoded.Width, encoded.Height
 			if err := st.Media.UpdateImageEncoding(ctx, existing.ID, encoded.ContentType, &width, &height); err != nil {
@@ -449,6 +450,7 @@ func processImages(ctx context.Context, st *store.Store, mediaStore media.Store,
 		}
 
 		recordFullVariant(ctx, st, id, key, encoded, logger, sourceID)
+		recordThumbVariant(ctx, st, mediaStore, id, key, encoded.Data, logger, sourceID)
 
 		ids = append(ids, id)
 		stats.uploaded++
@@ -470,15 +472,42 @@ func processImages(ctx context.Context, st *store.Store, mediaStore media.Store,
 // is currently redundant.
 func recordFullVariant(ctx context.Context, st *store.Store, imageID, key string, encoded media.EncodeResult, logger *log.Logger, sourceID string) {
 	width, height := encoded.Width, encoded.Height
+	hash := media.ContentSHA256(encoded.Data)
 	if _, err := st.Media.UpsertImageVariant(ctx, store.UpsertImageVariantInput{
-		ImageID:     imageID,
-		Name:        model.VariantFull,
-		StorageKey:  key,
-		ContentType: encoded.ContentType,
-		Width:       &width,
-		Height:      &height,
+		ImageID:       imageID,
+		Name:          model.VariantFull,
+		StorageKey:    key,
+		ContentType:   encoded.ContentType,
+		Width:         &width,
+		Height:        &height,
+		ContentSHA256: &hash,
 	}); err != nil {
 		logger.Printf("import %s: record full variant for %s: %v (image is served from exercise_images; re-run to add it)", sourceID, key, err)
+	}
+}
+
+// recordThumbVariant writes the thumb rendition for an image whose full
+// bytes were just stored. Failure is logged and not counted against the
+// image, for the same reason as recordFullVariant: the image is complete
+// without it, the thumb route serves the full image in its place, and
+// cmd/backfill-thumbs picks up any image still missing one.
+func recordThumbVariant(ctx context.Context, st *store.Store, mediaStore media.Store, imageID, fullKey string, full []byte, logger *log.Logger, sourceID string) {
+	thumb, err := media.StoreThumb(ctx, mediaStore, fullKey, full)
+	if err != nil {
+		logger.Printf("import %s: thumb for %s: %v (full image unaffected; cmd/backfill-thumbs will retry)", sourceID, fullKey, err)
+		return
+	}
+	width, height := thumb.Width, thumb.Height
+	if _, err := st.Media.UpsertImageVariant(ctx, store.UpsertImageVariantInput{
+		ImageID:       imageID,
+		Name:          model.VariantThumb,
+		StorageKey:    thumb.StorageKey,
+		ContentType:   thumb.ContentType,
+		Width:         &width,
+		Height:        &height,
+		ContentSHA256: &thumb.ContentSHA256,
+	}); err != nil {
+		logger.Printf("import %s: record thumb variant for %s: %v (cmd/backfill-thumbs will retry)", sourceID, fullKey, err)
 	}
 }
 

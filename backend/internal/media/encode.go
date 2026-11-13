@@ -59,10 +59,39 @@ func Encode(r io.Reader) (EncodeResult, error) {
 		return EncodeResult{}, fmt.Errorf("decode image: %w", err)
 	}
 
-	img = resizeToFit(img, maxDimension)
+	return encodeJPEG(img, maxDimension, jpegQuality)
+}
+
+// thumbMaxDimension and thumbJPEGQuality size the thumb rendition. List rows
+// draw these at 44-56 CSS px; 128 covers that at a 2x device pixel ratio and
+// most of it at 3x, for a few KB instead of the full image's tens. Quality
+// sits lower than the full rendition's because JPEG artefacts at this size
+// are smaller than a screen pixel.
+const (
+	thumbMaxDimension = 128
+	thumbJPEGQuality  = 75
+)
+
+// EncodeThumb decodes an image (in practice the stored full rendition) and
+// re-encodes it as a JPEG whose longer edge is at most thumbMaxDimension.
+//
+// Built from the full rendition rather than the original upload so that
+// every thumb, whether made at import time or by cmd/backfill-thumbs long
+// after the original is gone, comes from the same source and looks the
+// same.
+func EncodeThumb(r io.Reader) (EncodeResult, error) {
+	img, _, err := image.Decode(r)
+	if err != nil {
+		return EncodeResult{}, fmt.Errorf("decode image: %w", err)
+	}
+	return encodeJPEG(img, thumbMaxDimension, thumbJPEGQuality)
+}
+
+func encodeJPEG(img image.Image, max, quality int) (EncodeResult, error) {
+	img = resizeToFit(img, max)
 
 	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: jpegQuality}); err != nil {
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality}); err != nil {
 		return EncodeResult{}, fmt.Errorf("encode jpeg: %w", err)
 	}
 

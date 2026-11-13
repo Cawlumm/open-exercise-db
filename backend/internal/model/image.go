@@ -28,6 +28,11 @@ type Image struct {
 	// backs the importer's idempotency lookup (GetImageByStorageKey), which
 	// runs before any variant row exists for a brand-new image.
 	Variants []ImageVariant `json:"variants"`
+
+	// ContentSHA256 is the full rendition's recorded content hash, read
+	// from its exercise_image_variants row; nil when unknown. Set only by
+	// store.MediaStore.GetImageByID, for the image route's conditional GET.
+	ContentSHA256 *string `json:"-"`
 }
 
 // ImageVariant is one stored rendition of an Image — one row in
@@ -41,12 +46,17 @@ type Image struct {
 // existing objects never move — see migration 0002 for the full rationale.
 type ImageVariant struct {
 	ID          string    `json:"id"`
-	Name        string    `json:"name" doc:"Rendition name — full today; thumb/medium as they are added"`
+	Name        string    `json:"name" doc:"Rendition name: full or thumb"`
 	StorageKey  string    `json:"storage_key"`
 	ContentType string    `json:"content_type"`
 	Width       *int      `json:"width,omitempty"`
 	Height      *int      `json:"height,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
+
+	// ContentSHA256 is the sha256 of the stored bytes as 64 hex characters,
+	// or nil when the writer did not record one (migration 0005). Lets the
+	// image routes answer If-None-Match without reading the object.
+	ContentSHA256 *string `json:"-"`
 }
 
 // Image moderation statuses, matching the CHECK in migration 0001. Only an
@@ -64,3 +74,7 @@ const (
 // it, so a typo would silently produce an image whose advertised URL
 // resolves to nothing.
 const VariantFull = "full"
+
+// VariantThumb is the small rendition list rows render, generated from the
+// full image by media.EncodeThumb.
+const VariantThumb = "thumb"

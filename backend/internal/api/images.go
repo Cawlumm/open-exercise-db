@@ -9,6 +9,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/conditional"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Cawlumm/open-exercise-db/internal/media"
 	"github.com/Cawlumm/open-exercise-db/internal/model"
@@ -110,9 +111,10 @@ func registerImageRoutes(hapi huma.API, s *store.Store, mediaStore media.Store) 
 		Method:      http.MethodGet,
 		Path:        "/api/v1/images/{id}/{variant}",
 		Summary:     "Fetch one rendition of a re-hosted exercise image",
-		Description: "Renditions are listed per image as Exercise.Images[].variants. " +
-			"Today every image has exactly one, full, whose URL is the same as " +
-			"Image.url — smaller sizes will appear here without url changing.",
+		Description: "Renditions are listed per image as Exercise.Images[].variants: " +
+			"full (whose URL is the same as Image.url) and thumb (longest edge at most 128px). " +
+			"Asking for thumb or full on an image that has no such rendition yet serves the " +
+			"full image rather than a 404; any other unknown name is a 404.",
 		Tags:     []string{"images"},
 		Metadata: map[string]any{rateLimitTierKey: ratelimit.TierImage},
 		Errors:   []int{http.StatusNotFound, http.StatusTooManyRequests},
@@ -170,8 +172,52 @@ func GetImage(ctx context.Context, s *store.Store, mediaStore media.Store, input
 	if err := requireVisibleImage(ctx, img); err != nil {
 		return nil, err
 	}
+	return serveImageObject(ctx, mediaStore, &input.Params, imageObject{
+		key:         img.StorageKey,
+		contentType: img.ContentType,
+		storedHash:  img.ContentSHA256,
+		label:       "image " + img.ID,
+	}, imageCacheControl, "image not found")
+}
 
-	rc, err := mediaStore.Get(ctx, img.StorageKey)
+// imageObject is what serveImageObject needs to know about one stored
+// rendition, whichever route resolved it.
+type imageObject struct {
+	key         string
+	contentType string
+	storedHash  *string // exercise_image_variants.content_sha256; nil = unknown
+	label       string  // for logs
+}
+
+// serveImageObject answers a conditional GET for one stored object, reading
+// the media store only when the answer is not a 304.
+//
+// The ETag is the first 32 hex characters of the content's sha256 (the
+// value etagValueBytes has always produced), taken from the recorded hash
+// when there is one. That is what lets a revalidation skip the storage read
+// entirely: before migration 0005 every 304 downloaded and hashed the whole
+// object first, costing a 200's storage read for a response with no body.
+//
+// Why a recorded hash is safe to trust: images are addressed by id and their
+// bytes are not edited in place. The one path that does rewrite an object
+// under an existing key, internal/seed's repair of a missing object, goes
+// through store.UpsertImageVariant, which overwrites content_sha256 with the
+// new bytes' hash or clears it to NULL, and NULL falls back to hashing the
+// bytes. If bytes were ever replaced out of band without touching the row,
+// the 200 path below notices: it re-hashes what it read, logs the mismatch
+// and sends the true ETag, so a client that downloads the new bytes is never
+// handed a tag describing the old ones. A client still holding the old tag
+// could be told 304 until the row is corrected, which is no weaker than the
+// promise `immutable` in imageCacheControl already makes: bytes under a
+// live id are not to be replaced without updating the row.
+func serveImageObject(ctx context.Context, mediaStore media.Store, params *conditional.Params, obj imageObject, cc, notFoundMsg string) (*GetImageOutput, error) {
+	if obj.storedHash != nil {
+		if notModified := checkNotModified(params, etagFromSHA256(*obj.storedHash), cc); notModified != nil {
+			return nil, notModified
+		}
+	}
+
+	rc, err := mediaStore.Get(ctx, obj.key)
 	if err != nil {
 		// A row whose object is absent is a 404, not a 500. Both backends
 		// report it as media.ErrObjectNotFound (FilesystemStore wraps
@@ -179,37 +225,49 @@ func GetImage(ctx context.Context, s *store.Store, mediaStore media.Store, input
 		// distinction could be made, and until this check existed nothing in
 		// the API consumed the sentinel — every missing object answered 500.
 		//
-		// It matters most in the case that actually produces missing objects:
-		// an incomplete cmd/migrate-media backfill leaves rows pointing at keys
-		// the destination bucket never received. As a 5xx those are uncacheable
-		// at the CDN, indistinguishable from the API being broken, and they
-		// bury a real outage under thousands of routine errors.
+		// It matters most in the cases that actually produce missing
+		// objects: an incomplete cmd/migrate-media backfill, or a
+		// partially-completed re-encode, leaves rows pointing at keys the
+		// bucket never received. As a 5xx those are uncacheable at the CDN,
+		// indistinguishable from the API being broken, and they bury a real
+		// outage under thousands of routine errors.
 		if errors.Is(err, media.ErrObjectNotFound) {
-			log.Printf("image %s: object %s missing from media store", img.ID, img.StorageKey)
-			return nil, huma.Error404NotFound("image not found")
+			log.Printf("%s: object %s missing from media store", obj.label, obj.key)
+			return nil, huma.Error404NotFound(notFoundMsg)
 		}
-		log.Printf("media store get %s (image %s): %v", img.StorageKey, img.ID, err)
+		log.Printf("media store get %s (%s): %v", obj.key, obj.label, err)
 		return nil, huma.Error500InternalServerError("internal error")
 	}
 	defer rc.Close()
 
 	data, err := io.ReadAll(rc)
 	if err != nil {
-		log.Printf("read image %s (%s): %v", img.ID, img.StorageKey, err)
+		log.Printf("read %s (%s): %v", obj.label, obj.key, err)
 		return nil, huma.Error500InternalServerError("internal error")
 	}
 
 	tag := etagValueBytes(data)
-	if notModified := checkNotModified(&input.Params, tag, imageCacheControl); notModified != nil {
+	if obj.storedHash != nil && etagFromSHA256(*obj.storedHash) != tag {
+		log.Printf("%s: recorded content_sha256 does not match object %s; serving the object's own ETag "+
+			"(clear or correct the row's content_sha256)", obj.label, obj.key)
+	}
+	if notModified := checkNotModified(params, tag, cc); notModified != nil {
 		return nil, notModified
 	}
 
 	return &GetImageOutput{
-		ContentType:  img.ContentType,
-		CacheControl: imageCacheControl,
+		ContentType:  obj.contentType,
+		CacheControl: cc,
 		ETag:         etagHeader(tag),
 		Body:         data,
 	}, nil
+}
+
+// etagFromSHA256 turns a recorded content_sha256 into the bare ETag
+// etagValueBytes computes from the same bytes: the first 16 bytes, in hex.
+// The migration's CHECK guarantees 64 characters.
+func etagFromSHA256(hexSum string) string {
+	return hexSum[:32]
 }
 
 // GetImageVariantInput identifies one rendition by image id and variant
@@ -234,12 +292,23 @@ type GetImageVariantInput struct {
 // GetImageVariant serves one named rendition's bytes.
 //
 // Unknown names are 404, never a fallback to the full image. A client
-// asking for a thumbnail and silently receiving a full-resolution image
-// sees a successful request while downloading many times the bytes it
-// budgeted for — on exactly the mobile connections thumbnails exist to
-// protect, and with nothing in the response to reveal the substitution.
+// asking for a rendition this server does not make and silently receiving a
+// full-resolution image sees a successful request while downloading many
+// times the bytes it budgeted for, with nothing in the response to reveal
+// the substitution.
+//
+// The renditions the server does make are different. Every new image gets a
+// thumb, but existing ones only get theirs when cmd/backfill-thumbs runs
+// after deploy, and an image whose thumb failed to encode has none. A client
+// that builds /{id}/thumb itself, rather than reading it from
+// Exercise.Images[].variants, must not get a broken image for that, so a
+// missing thumb (or a missing full row, which says nothing about the bytes)
+// is served from the image itself. See serveMissingRendition.
 func GetImageVariant(ctx context.Context, s *store.Store, mediaStore media.Store, input *GetImageVariantInput) (*GetImageOutput, error) {
 	variant, imageStatus, err := s.Media.GetImageVariant(ctx, input.ID, input.Variant)
+	if errors.Is(err, pgx.ErrNoRows) && (input.Variant == model.VariantThumb || input.Variant == model.VariantFull) {
+		return serveMissingRendition(ctx, s, mediaStore, input)
+	}
 	if err != nil {
 		return nil, mapStoreError(err, "image variant not found")
 	}
@@ -248,36 +317,41 @@ func GetImageVariant(ctx context.Context, s *store.Store, mediaStore media.Store
 		return nil, err
 	}
 
-	rc, err := mediaStore.Get(ctx, variant.StorageKey)
+	return serveImageObject(ctx, mediaStore, &input.Params, imageObject{
+		key:         variant.StorageKey,
+		contentType: variant.ContentType,
+		storedHash:  variant.ContentSHA256,
+		label:       "image " + input.ID + " variant " + input.Variant,
+	}, imageCacheControl, "image variant not found")
+}
+
+// serveMissingRendition answers /{id}/full or /{id}/thumb for an image that
+// has no variant row by that name, with the image's own (full) bytes.
+//
+// For full that is simply the same object, so it keeps the immutable cache
+// policy. For thumb it is a stand-in, and caching it as immutable would pin
+// the full-size bytes to the thumb URL in every browser and CDN for a year,
+// long after the backfill has made the real thumb. So it goes out with the
+// API's ordinary short policy (cacheControl, api.go) instead, and
+// revalidation picks the thumb up once it exists: its ETag differs from the
+// full image's, so the client's If-None-Match stops matching and it gets a
+// 200 with the small bytes.
+func serveMissingRendition(ctx context.Context, s *store.Store, mediaStore media.Store, input *GetImageVariantInput) (*GetImageOutput, error) {
+	img, err := s.Media.GetImageByID(ctx, input.ID)
 	if err != nil {
-		// Same reasoning as GetImage: a row whose object is absent is a 404,
-		// not a 500. Variants make this more likely rather than less — a
-		// partially-completed re-encode leaves rows for renditions whose
-		// bytes were never written.
-		if errors.Is(err, media.ErrObjectNotFound) {
-			log.Printf("image %s variant %s: object %s missing from media store", input.ID, input.Variant, variant.StorageKey)
-			return nil, huma.Error404NotFound("image variant not found")
-		}
-		log.Printf("media store get %s (image %s variant %s): %v", variant.StorageKey, input.ID, input.Variant, err)
-		return nil, huma.Error500InternalServerError("internal error")
+		return nil, mapStoreError(err, "image variant not found")
 	}
-	defer rc.Close()
-
-	data, err := io.ReadAll(rc)
-	if err != nil {
-		log.Printf("read image %s variant %s (%s): %v", input.ID, input.Variant, variant.StorageKey, err)
-		return nil, huma.Error500InternalServerError("internal error")
+	if err := requireVisibleImage(ctx, img); err != nil {
+		return nil, err
 	}
-
-	tag := etagValueBytes(data)
-	if notModified := checkNotModified(&input.Params, tag, imageCacheControl); notModified != nil {
-		return nil, notModified
+	cc := imageCacheControl
+	if input.Variant != model.VariantFull {
+		cc = cacheControl
 	}
-
-	return &GetImageOutput{
-		ContentType:  variant.ContentType,
-		CacheControl: imageCacheControl,
-		ETag:         etagHeader(tag),
-		Body:         data,
-	}, nil
+	return serveImageObject(ctx, mediaStore, &input.Params, imageObject{
+		key:         img.StorageKey,
+		contentType: img.ContentType,
+		storedHash:  img.ContentSHA256,
+		label:       "image " + img.ID + " (standing in for missing " + input.Variant + ")",
+	}, cc, "image variant not found")
 }
