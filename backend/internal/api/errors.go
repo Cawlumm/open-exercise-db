@@ -21,10 +21,12 @@ import (
 // for exactly this. So every error this API returns sets `type`, and that
 // URI is what consumers are documented to switch on.
 //
-// The URIs are dereferenceable under the project's own domain rather than
-// opaque slugs like "exercise_not_found": RFC 9457 §3.1.1 expects a client to
-// be able to follow the type URI to human-readable documentation, and a
-// string in a JSON body that leads nowhere gives that up for no saving.
+// The URIs are dereferenceable rather than opaque slugs like
+// "exercise_not_found": RFC 9457 §3.1.1 expects a client to be able to follow
+// the type URI to human-readable documentation, and a string in a JSON body
+// that leads nowhere gives that up for no saving. They point at docs/ERRORS.md
+// in this repository, a location the project controls: an earlier base on a
+// domain nobody had registered could have been claimed by anyone.
 
 // errorTypeBase prefixes every problem type URI. A constant rather than
 // something derived from the request host: the URI identifies the *class of
@@ -32,7 +34,7 @@ import (
 // public one must emit identical values. Deriving it from the host would
 // mean a client that switches on the URI stops working the moment it points
 // at a different deployment.
-const errorTypeBase = "https://openexercisedb.org/errors/"
+const errorTypeBase = "https://github.com/Cawlumm/open-exercise-db/blob/main/docs/ERRORS.md#"
 
 // Problem types — one per stable, documented failure mode. New failure modes
 // get a constant here rather than an inline string at a call site, so the

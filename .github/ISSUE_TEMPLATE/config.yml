@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/Cawlumm/open-exercise-db/tree/main/docs
+    about: API policy, design notes and deployment docs. Check here before opening an issue.
+  - name: Security vulnerability
+    url: https://github.com/Cawlumm/open-exercise-db/security/advisories/new
+    about: Report security issues privately, not as a public issue.

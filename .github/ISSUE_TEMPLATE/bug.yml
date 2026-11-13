@@ -1,0 +1,26 @@
+name: Bug report
+description: The API, docs or tooling behaves incorrectly.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Include the request (method, path, query) and the response status and body.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Where you saw it (hosted API, or a self-hosted commit hash).
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
