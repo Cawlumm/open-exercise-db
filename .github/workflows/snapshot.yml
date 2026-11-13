@@ -21,8 +21,7 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
   group: snapshot
@@ -33,11 +32,10 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
     env:
       REPO_URL: https://github.com/${{ github.repository }}.git
-      # Only ever handed to git as a per-command extraheader (never written to
-      # .git/config), and only for the ls-remote, clone and push of `catalog`.
-      GH_TOKEN: ${{ github.token }}
     steps:
       # actions/checkout v4.4.0
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -46,6 +44,10 @@ jobs:
           persist-credentials: false
 
       - name: Check out the catalog branch (or start it)
+        env:
+          # Step-scoped so the snapshot build never sees it, and only ever handed
+          # to git as a per-command extraheader (never written to .git/config).
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
@@ -82,6 +84,10 @@ jobs:
 
       - name: Commit and push
         working-directory: catalog
+        env:
+          # Step-scoped so the snapshot build never sees it, and only ever handed
+          # to git as a per-command extraheader (never written to .git/config).
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ -z "$(git status --porcelain)" ]; then
