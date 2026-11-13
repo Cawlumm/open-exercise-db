@@ -26,9 +26,9 @@ About 870 to start with, in English and Spanish.
 
 ### Made by everyone
 
-Anyone can add an exercise, fix one or translate it, from inside an app that uses the
-database or through the API directly. Every change is reviewed before it is published, and
-every published change can be reverted.
+Anyone can add an exercise, fix one or translate it from inside an app that uses the
+database. Every change is reviewed before it is published, and every published change can
+be reverted.
 
 ### For everyone
 
@@ -57,8 +57,9 @@ how to ask for more are in [`docs/API_POLICY.md`](docs/API_POLICY.md).
 
 ## Contribute
 
-- **Exercises and translations**: send them through the API, or let your app submit on its
-  users' behalf. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+- **Exercises and translations**: apps submit them on their users' behalf with an app
+  credential. Credentials are issued by hand for now:
+  [ask for one](https://github.com/Cawlumm/open-exercise-db/issues/new?template=rate-limit-request.yml).
 - **Code**: fork, branch and open a pull request. [`CONTRIBUTING.md`](CONTRIBUTING.md) covers
   setup and tests.
 - **Something wrong in the data?** [Open an issue](https://github.com/Cawlumm/open-exercise-db/issues/new/choose).
