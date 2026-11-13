@@ -24,8 +24,8 @@ contributions with moderation, and the policy that governs them.
 - `GET /api/v1/exercises/export` returns the whole catalog in one response.
 - `GET /api/v1/meta/muscle-groups`, `/equipment`, `/categories` and `/locales` list the
   taxonomy terms the filters accept.
-- Exercise images are served at `GET /api/v1/images/{id}` and `GET /api/v1/images/{id}/{variant}`
-  (small variants such as thumbnails), long-cached and usable from an `<img>` tag.
+- Exercise images are served at `GET /api/v1/images/{id}` (and `/{variant}`; only the `full`
+  variant exists today), long-cached and usable from an `<img>` tag.
 - Responses carry `ETag` and `Cache-Control`, and conditional requests answer `304`.
 - OpenAPI 3.1 document at `/api/v1/openapi.json`, interactive docs at `/docs`, and a discovery
   index at `/api/v1`.
