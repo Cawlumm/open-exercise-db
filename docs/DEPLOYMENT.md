@@ -24,8 +24,8 @@ The live resources:
 | Cloud Run service | `oedb-api` |
 | Deploy identity | `gh-deploy@open-exercise-db.iam.gserviceaccount.com` |
 | Runtime identity | `oedb-run@open-exercise-db.iam.gserviceaccount.com` |
-| Supabase project | `ecwcgrogsewpjdzqgusn` — PostgreSQL 17.6, `us-east-1`, database `postgres` |
-| Supabase org | `efjtvmtccbbxwfnjkyji` |
+| Supabase project | `<project-ref>` — PostgreSQL 17.6, `us-east-1`, database `postgres` |
+| Supabase org | `<org-ref>` |
 | Keepalive | Cloud Scheduler job `oedb-supabase-keepalive` (`us-east4`) — see rule 3b |
 | R2 bucket | `oedb-media-dev` |
 
@@ -57,7 +57,7 @@ lets the lock and the unlock land on different server connections. That silently
 concurrent-startup race the lock exists to close and leaks a held lock. It also breaks the
 prepared statements pgx uses by default.
 
-The direct endpoint (`db.<ref>.supabase.co:5432`) does not have that problem, but it is
+The direct endpoint (`db.<project-ref>.supabase.co:5432`) does not have that problem, but it is
 **IPv6-only**, and Cloud Run egress is IPv4 — so it is unreachable from production regardless.
 
 That leaves the session pooler: `aws-0-us-east-1.pooler.supabase.com:5432`, user
@@ -373,7 +373,7 @@ done
 Adding versions — **use `printf`, never `echo`**:
 
 ```bash
-printf '%s' 'postgres://postgres.<ref>:PASS@aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require' \
+printf '%s' 'postgres://postgres.<project-ref>:PASS@aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require' \
   | gcloud secrets versions add oedb-database-url --data-file=-
 printf '%s' '<r2 access key id>'     | gcloud secrets versions add oedb-r2-access-key-id --data-file=-
 printf '%s' '<r2 secret access key>' | gcloud secrets versions add oedb-r2-secret-access-key --data-file=-
@@ -431,7 +431,7 @@ cd backend
 
 # -limit 5 first: a real (not dry-run) write proves the R2 credentials before
 # committing to a 40-minute run.
-DATABASE_URL='postgres://postgres.<ref>:...@aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require' \
+DATABASE_URL='postgres://postgres.<project-ref>:...@aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require' \
 R2_ACCOUNT_ID='...' R2_ACCESS_KEY_ID='...' R2_SECRET_ACCESS_KEY='...' R2_BUCKET='oedb-media-dev' \
 go run ./cmd/import-freeexercisedb -limit 5
 

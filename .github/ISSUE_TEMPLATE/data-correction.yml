@@ -1,0 +1,35 @@
+name: Data correction
+description: An exercise is wrong, missing, duplicated or badly described.
+labels: [data]
+body:
+  - type: input
+    id: exercise
+    attributes:
+      label: Exercise
+      description: The exercise id or slug (from the API or export).
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong
+      description: Wrong muscle group, bad instructions, duplicate, broken image, missing alias, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: fix
+    attributes:
+      label: Suggested fix
+      description: Write it in your own words. Do not paste text copied from another source.
+  - type: input
+    id: source
+    attributes:
+      label: Source (optional)
+      description: A URL that supports the correction, for provenance only.
+  - type: checkboxes
+    id: license
+    attributes:
+      label: Licensing
+      options:
+        - label: Any text or image I provide is my own work or already CC0/public domain, and I dedicate it under CC0 1.0.
+          required: true

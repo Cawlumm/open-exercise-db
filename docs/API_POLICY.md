@@ -239,6 +239,16 @@ API, and registering does not make polling them reasonable. Mirror the dump on a
 Anonymous access is not going away and needs no key. This exists so the consumers who *are*
 accountable are not held to a limit sized for anonymous traffic.
 
+## Submitting data on your users' behalf
+
+`POST /submissions` and `POST /images` accept contributions (new exercises, edits,
+translations, images) from signed-in users. Everything accepted is published under
+[CC0 1.0](../DATA_LICENSE): by submitting, the contributor dedicates their contribution to the
+public domain, irrevocably and without attribution. **If your app submits on behalf of its
+users, you must tell them this before they submit** and must only forward content they wrote
+themselves or that is already CC0/public domain (nothing copied from share-alike sources such
+as wger). Submissions are reviewed by a human before they appear in the public API.
+
 ## Debounce your search (not optional)
 
 `GET /exercises` is the endpoint a live type-ahead search hits, and it's easy to blow through

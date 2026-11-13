@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/assets/logo.svg" alt="open-exercise-db" height="56">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+    <img src="docs/assets/logo-light.svg" alt="open-exercise-db" height="56">
+  </picture>
 </p>
 
 <p align="center">
@@ -9,24 +12,18 @@
 <p align="center">
   <img alt="code license" src="https://img.shields.io/badge/code%20license-MIT-blue">
   <img alt="data license" src="https://img.shields.io/badge/data%20license-CC0%201.0-lightgrey">
-  <img alt="status" src="https://img.shields.io/badge/status-phase%201-yellow">
+  <img alt="status" src="https://img.shields.io/badge/status-phase%202-yellow">
 </p>
 
 ---
 
 ## Why this exists
 
-Fitness apps that want a free exercise catalog today mostly lean on
-[`yuhonas/free-exercise-db`](https://github.com/yuhonas/free-exercise-db) — a great
-public-domain dataset of ~800 exercises, but its GitHub repo has PRs sitting unmerged for
-months, with no active review queue behind it.
-
-Other prior art exists — [wger.de](https://wger.de) (a full self-hosted fitness tracker with
-its own CC-BY-SA exercise wiki), [exercemus/exercises](https://github.com/exercemus/exercises)
-(a static dataset aggregating wger + free-exercise-db), and commercial APIs like ExerciseDB —
-but none combine an open community submission + moderation queue, translations, versioned/
-revertible revisions, a CC0 data license, and an API-first documented surface. That's the gap
-this project fills.
+open-exercise-db is OpenFoodFacts, but for fitness: an open, community-maintained catalog of
+exercises that any app can build on. Anyone can submit an exercise or a fix, moderators review
+it, every published change is versioned and revertible, names and instructions are
+translatable, the data is CC0, and the whole thing is a documented API. The projects it builds
+on are credited under [Sources and related projects](#sources-and-related-projects).
 
 Full design rationale, data model, and phased build plan: **[`docs/DESIGN.md`](docs/DESIGN.md)**.
 
@@ -185,6 +182,32 @@ Pages, edge cache) hosting.
 - Full rationale and alternatives weighed: [`docs/DESIGN.md`](docs/DESIGN.md)
 - Go project layout, layering, and code conventions: [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md)
 - Running it in production — GCP setup, secrets, bootstrap, rollback: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
+
+## Sources and related projects
+
+open-exercise-db stands on other people's open work. Go check these out:
+
+- **[yuhonas/free-exercise-db](https://github.com/yuhonas/free-exercise-db)** (Unlicense):
+  the day-one seed. Its ~870 exercises and their images were imported as-is, and every
+  imported revision keeps its `license` and `source_url`.
+- **[wrkout/exercises.json](https://github.com/wrkout/exercises.json)** by Ollie Jennings:
+  the original dataset free-exercise-db restructured.
+- **[wger](https://github.com/wger-project/wger)**: a full self-hosted fitness tracker with a
+  community exercise wiki. Its data is CC-BY-SA, which is not compatible with CC0, so nothing
+  is imported from it; it is only a reference for spotting gaps.
+- **[exercemus/exercises](https://github.com/exercemus/exercises)**: a static dataset that
+  aggregates wger and free-exercise-db. Reference only, for the same reason.
+- **[Open Food Facts](https://world.openfoodfacts.org)**: the model this project follows for
+  community submissions, moderation and bulk data dumps.
+- **Spanish (`es`) translations** are machine-drafted (by an LLM) and marked as such in the API
+  (`*_machine_origin`) until a person reviews them.
+- **Logo** wordmark is set in [Inter](https://rsms.me/inter/) (SIL Open Font License),
+  outlined to paths.
+
+Used by [Lyftr](https://github.com/Cawlumm/lyftr), a self-hosted workout tracker.
+
+If you hold rights to something in the catalog and want it credited differently or removed,
+open an issue.
 
 ## License
 

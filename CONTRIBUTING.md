@@ -8,19 +8,28 @@ the "moderation SLA" note below before submitting anything time-sensitive.
 Standard fork + PR flow:
 
 1. Fork the repo, create a branch off `main`.
-2. Match the existing layout (`backend/config|controllers|models|routes|stores|middleware`)
-   and keep PRs scoped to one change.
-3. `cd backend && go test ./...` must pass; add tests for new behavior.
+2. Match the existing layout and keep PRs scoped to one change. Binaries live in
+   `backend/cmd/` (`api-server`, importers); everything else is under `backend/internal/`
+   (`api` handlers, `store` SQL, `model` types, `database`, `config`, `media`, `ratelimit`, ...).
+   `docs/CONVENTIONS.md` explains the layering.
+3. Needs Go 1.26 and, for the store/database tests, Postgres: `docker compose up -d postgres`
+   (the compose service is named `postgres`; the default `.env.example` DSN points at it).
+   Then `cd backend && go test ./...` must pass; add tests for new behavior. Without a database
+   those tests skip locally; CI sets `OEDB_REQUIRE_POSTGRES=1` so they cannot skip there, and you
+   can set it yourself to make a missing database a failure.
 4. Open a PR against `main` describing what changed and why.
 
 ## Data contributions (the actual point of this project)
 
-Once Phase 2 ships (GitHub OAuth + submissions API), you'll be able to:
+Sign in with GitHub (`GET /api/v1/auth/github`), then use `POST /api/v1/submissions` with a
+`type` of:
 
-- **Submit a new exercise** — `POST /api/v1/submissions` with `type: "create"`, or the
-  `/exercises/new` form once the web UI exists.
-- **Suggest an edit** — `POST /api/v1/exercises/{id}/submissions`.
-- **Add or improve a translation** — `POST /api/v1/exercises/{id}/translations`.
+- `create` — propose a new exercise.
+- `edit` — suggest a change to an existing exercise (set `target_exercise_id`).
+- `translation` — add or improve a translation (set `target_exercise_id` and `locale`).
+
+`GET /api/v1/submissions/mine` lists your own. The full schema is in the generated OpenAPI
+docs at `/docs`.
 
 Every submission goes through human review before it's published — nothing you submit is
 visible through the public API until a moderator approves it.
@@ -63,9 +72,12 @@ notes — reviewers can merge/redirect if needed.
 - If you'd rather link than upload, an external URL (e.g. a YouTube demo) is accepted for
   videos.
 
-## Licensing note
+## Licensing of contributions
 
-By contributing data, you're agreeing it can be published under this project's data license,
-[CC0 1.0](DATA_LICENSE) — public domain, no attribution required downstream (though we track
-provenance internally as a courtesy). Code contributions fall under the project's
-[MIT license](LICENSE).
+**Data:** by submitting data (exercises, edits, translations, images, descriptions) you
+dedicate your contribution to the public domain under [CC0 1.0](DATA_LICENSE). Only submit
+what you wrote yourself or what is already CC0/public domain; do not copy from sources with
+share-alike or attribution terms (for example wger, which is CC-BY-SA). Provenance is tracked
+internally as a courtesy, but no attribution is required downstream.
+
+**Code:** contributions to the code are licensed under the project's [MIT license](LICENSE).
