@@ -113,7 +113,7 @@ internal/database          pool + migrations. Used by main and store, but holds
 Rules:
 
 - **`internal/api` never writes SQL.** If a handler needs data, it calls a store method.
-  Same split as lyftr's `controllers/` ↔ `stores/`, which exists for the same reason.
+  This is the usual controller/store split, and it exists so queries can be tested and changed without touching HTTP code.
 - **`internal/store` never imports `internal/api`.** Dependencies point downward only. If you
   ever need the reverse, the type belongs in `internal/model`.
 - **Database types never leak into the API surface.** Handlers return response structs
@@ -357,8 +357,8 @@ Content-Type: application/problem+json
 - **Test files sit next to the code**: `internal/store/exercises_test.go`.
 - **Store tests run against real Postgres**, not mocks — mocked SQL tests assert that the mock
   was called, which proves nothing about the query. Use a disposable database
-  (testcontainers or a dedicated CI service container); the same reasoning lyftr applies with
-  its real-SQLite tests.
+  (testcontainers or a dedicated CI service container); the same reasoning applies to any
+  data-heavy service: test the real database, not a stand-in.
 - **A missing Postgres skips locally but fails in CI, on purpose.** `requirePostgres` (duplicated
   per-package — see below) calls `t.Skipf` so a contributor without Docker still gets a useful
   `go test ./...`. But an unconditional skip is a silent-success trap: point it at an
@@ -384,7 +384,7 @@ Content-Type: application/problem+json
   stuttering (`store.StoreExercises`) is the thing to avoid.
 - **Receivers**: short and consistent — `func (s *ExerciseStore) List(...)`.
 - **Exported identifiers get doc comments starting with the identifier name.**
-- **Comments explain WHY, not WHAT** — same rule as lyftr's own CLAUDE.md.
+- **Comments explain WHY, not WHAT** — if the code already says what, the comment should say why.
 - **Accept interfaces, return structs.**
 
 ---

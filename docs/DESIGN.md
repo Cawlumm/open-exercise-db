@@ -241,11 +241,10 @@ status)`, `exercise_translations(revision_id, locale)` unique, `submissions.stat
   bulk-importing it would taint an otherwise-CC0 corpus with share-alike obligations. Default:
   diff wger's exercise list (and exercemus's aggregated dataset, which already merged
   wger + free-exercise-db + exercemus.com and includes image/video links neither of the
-  others has) against what's already imported; a human writes an *original* CC0 description
+  others has; because it includes wger data it is reference for finding gaps only, never a source to copy from) against what's already imported; a human writes an *original* CC0 description
   for each gap, optionally crediting the source via `source_url` for provenance even though
-  the text is rewritten. Explicit alternative if volume matters more than purity: directly
-  import gap-fill exercises with `license='CC-BY-SA-4.0'` on just those rows (the
-  per-revision license field supports honest mixed provenance natively).
+  the text is rewritten. There is no import-as-CC-BY-SA fallback: the corpus is CC0 only, and
+  wger content must never be imported, however large the gap.
 
 ### Seed completeness bar (Phase 1.5, before any public submission opens)
 
