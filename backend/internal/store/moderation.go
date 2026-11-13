@@ -186,6 +186,20 @@ func (s *ModerationStore) Approve(ctx context.Context, d Decision) (ApproveResul
 		return ApproveResult{}, err
 	}
 
+	// Publishing a revision that names images makes those images public, so
+	// they must stop being "pending" in the same transaction. Left pending,
+	// the read path would serve (or hide) them by a status the moderator
+	// already decided, and they would keep counting against the uploader's
+	// pending-upload quota forever. A translation writes no revision and so
+	// publishes no image; its ids are left alone.
+	if sub.Type != model.SubmissionTypeTranslation && len(sub.ImageUploadIDs) > 0 {
+		if _, err := tx.Exec(ctx, `
+			UPDATE exercise_images SET status = 'approved'
+			WHERE id = ANY($1) AND status = 'pending'`, sub.ImageUploadIDs); err != nil {
+			return ApproveResult{}, fmt.Errorf("approve images of submission %s: %w", d.SubmissionID, err)
+		}
+	}
+
 	// Conditional on still being pending, and the row count is checked.
 	// The FOR UPDATE above serialises concurrent approvals, but relying on
 	// that alone makes correctness a property of lock timing — and a test
@@ -249,11 +263,20 @@ func (p submissionPayload) toRevision(imageIDs []string) ImportRevisionInput {
 		Level:            p.Level,
 		Instructions:     orEmpty(p.Instructions),
 		ImageIDs:         orEmpty(imageIDs),
-		License:          p.License,
-		AttributionText:  p.AttributionText,
-		SourceURL:        p.SourceURL,
-		ChangeSummary:    p.ChangeSummary,
+		License:          blankToNil(p.License),
+		AttributionText:  blankToNil(p.AttributionText),
+		SourceURL:        blankToNil(p.SourceURL),
+		ChangeSummary:    blankToNil(p.ChangeSummary),
 	}
+}
+
+// blankToNil stores "no value" as NULL however the submitter spelled it, so
+// an empty license is not published as a license of "".
+func blankToNil(p *string) *string {
+	if p == nil || strings.TrimSpace(*p) == "" {
+		return nil
+	}
+	return p
 }
 
 func orEmpty(s []string) []string {
@@ -308,10 +331,6 @@ func approveEdit(ctx context.Context, tx pgx.Tx, sub model.Submission, payload [
 	if sub.TargetExerciseID == nil {
 		return ApproveResult{}, errors.New("edit submission has no target exercise")
 	}
-	p, err := parsePayload(payload)
-	if err != nil {
-		return ApproveResult{}, err
-	}
 
 	var currentRevisionID *string
 	if err := tx.QueryRow(ctx,
@@ -322,16 +341,28 @@ func approveEdit(ctx context.Context, tx pgx.Tx, sub model.Submission, payload [
 		}
 		return ApproveResult{}, fmt.Errorf("lock target exercise: %w", err)
 	}
-
-	if currentRevisionID != nil {
-		if _, err := tx.Exec(ctx,
-			`UPDATE exercise_revisions SET status = 'superseded' WHERE id = $1`, *currentRevisionID,
-		); err != nil {
-			return ApproveResult{}, fmt.Errorf("supersede current revision: %w", err)
-		}
+	if currentRevisionID == nil {
+		return ApproveResult{}, fmt.Errorf("target exercise %s has no current revision to edit", *sub.TargetExerciseID)
 	}
 
-	revisionID, err := insertRevision(ctx, tx, *sub.TargetExerciseID, p.toRevision(sub.ImageUploadIDs))
+	// Read under the exercise lock, so the revision merged onto is the one
+	// this edit supersedes and not one a concurrent approval replaced.
+	current, err := loadRevision(ctx, tx, *currentRevisionID)
+	if err != nil {
+		return ApproveResult{}, err
+	}
+	merged, err := MergeEdit(current, payload, sub.ImageUploadIDs)
+	if err != nil {
+		return ApproveResult{}, err
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE exercise_revisions SET status = 'superseded' WHERE id = $1`, *currentRevisionID,
+	); err != nil {
+		return ApproveResult{}, fmt.Errorf("supersede current revision: %w", err)
+	}
+
+	revisionID, err := insertRevision(ctx, tx, *sub.TargetExerciseID, merged)
 	if err != nil {
 		return ApproveResult{}, err
 	}
@@ -341,6 +372,127 @@ func approveEdit(ctx context.Context, tx pgx.Tx, sub model.Submission, payload [
 		return ApproveResult{}, fmt.Errorf("repoint exercise at new revision: %w", err)
 	}
 	return ApproveResult{ExerciseID: *sub.TargetExerciseID, RevisionID: revisionID}, nil
+}
+
+// loadRevision reads one full revision row inside tx.
+func loadRevision(ctx context.Context, tx pgx.Tx, id string) (model.Revision, error) {
+	rev, err := scanRevision(tx.QueryRow(ctx,
+		`SELECT `+revisionColumns+` FROM exercise_revisions WHERE id = $1`, id))
+	if err != nil {
+		return model.Revision{}, fmt.Errorf("load revision %s: %w", id, err)
+	}
+	return rev, nil
+}
+
+// editPayload is the subset of an exercise an edit proposes.
+//
+// Every field is a pointer so "not sent" is distinguishable from "sent empty":
+// a revision is a complete snapshot, so an edit that names only `name` must
+// still publish a revision carrying the old muscle group, instructions and
+// images. Decoding into the create payload's value types turned every omitted
+// field into its zero value and published that, blanking the exercise.
+// A JSON null (or a blank string) reads the same as absent for the scalar
+// fields.
+type editPayload struct {
+	Name             *string   `json:"name"`
+	Aliases          *[]string `json:"aliases"`
+	MuscleGroup      *string   `json:"muscle_group"`
+	SecondaryMuscles *[]string `json:"secondary_muscles"`
+	Category         *string   `json:"category"`
+	Equipment        *string   `json:"equipment"`
+	Mechanic         *string   `json:"mechanic"`
+	Force            *string   `json:"force"`
+	Level            *string   `json:"level"`
+	Instructions     *[]string `json:"instructions"`
+	License          *string   `json:"license"`
+	AttributionText  *string   `json:"attribution_text"`
+	SourceURL        *string   `json:"source_url"`
+	ChangeSummary    *string   `json:"change_summary"`
+}
+
+// MergeEdit lays an edit payload over the revision it supersedes and returns
+// the complete revision that approval would write.
+//
+// Exported because the moderator's diff is computed from this same function:
+// a diff built by a separate comparison could disagree with what approval
+// publishes, and the diff is the only thing a moderator reads before
+// clicking.
+//
+// Images are additive. An edit that attaches uploads keeps the images the
+// exercise already has and appends the new ones; an edit that attaches none
+// leaves the images alone. Removing an image is a revert, not an edit.
+func MergeEdit(current model.Revision, payload []byte, imageUploadIDs []string) (ImportRevisionInput, error) {
+	var p editPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return ImportRevisionInput{}, fmt.Errorf("payload is not usable: %w", err)
+	}
+
+	out := ImportRevisionInput{
+		Name:             current.Name,
+		Aliases:          orEmpty(current.Aliases),
+		MuscleGroup:      current.MuscleGroup,
+		SecondaryMuscles: orEmpty(current.SecondaryMuscles),
+		Category:         current.Category,
+		Equipment:        current.Equipment,
+		Mechanic:         current.Mechanic,
+		Force:            current.Force,
+		Level:            current.Level,
+		Instructions:     orEmpty(current.Instructions),
+		ImageIDs:         orEmpty(current.ImageIDs),
+		License:          current.License,
+		AttributionText:  current.AttributionText,
+		SourceURL:        current.SourceURL,
+		ChangeSummary:    current.ChangeSummary,
+	}
+
+	if p.Name != nil {
+		if strings.TrimSpace(*p.Name) == "" {
+			return ImportRevisionInput{}, errors.New("payload has a blank name")
+		}
+		out.Name = *p.Name
+	}
+	setText := func(dst *string, v *string) {
+		if v != nil && strings.TrimSpace(*v) != "" {
+			*dst = *v
+		}
+	}
+	setText(&out.MuscleGroup, p.MuscleGroup)
+	setText(&out.Category, p.Category)
+	setText(&out.Equipment, p.Equipment)
+	setOptional := func(dst **string, v *string) {
+		if v != nil && strings.TrimSpace(*v) != "" {
+			*dst = v
+		}
+	}
+	setOptional(&out.Mechanic, p.Mechanic)
+	setOptional(&out.Force, p.Force)
+	setOptional(&out.Level, p.Level)
+	setOptional(&out.License, p.License)
+	setOptional(&out.AttributionText, p.AttributionText)
+	setOptional(&out.SourceURL, p.SourceURL)
+	setOptional(&out.ChangeSummary, p.ChangeSummary)
+
+	if p.Aliases != nil {
+		out.Aliases = orEmpty(*p.Aliases)
+	}
+	if p.SecondaryMuscles != nil {
+		out.SecondaryMuscles = orEmpty(*p.SecondaryMuscles)
+	}
+	if p.Instructions != nil {
+		out.Instructions = orEmpty(*p.Instructions)
+	}
+
+	seen := make(map[string]bool, len(out.ImageIDs))
+	for _, id := range out.ImageIDs {
+		seen[id] = true
+	}
+	for _, id := range imageUploadIDs {
+		if !seen[id] {
+			seen[id] = true
+			out.ImageIDs = append(out.ImageIDs, id)
+		}
+	}
+	return out, nil
 }
 
 func approveTranslation(ctx context.Context, tx pgx.Tx, sub model.Submission, payload []byte) (ApproveResult, error) {
