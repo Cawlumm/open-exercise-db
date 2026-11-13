@@ -211,12 +211,13 @@ func (c Config) UsesR2() bool {
 // deployment that keeps it signs session tokens anyone can forge.
 const PlaceholderJWTSecret = "change-me-to-a-long-random-string"
 
-// MinJWTSecretBytes is the shortest JWT_SECRET accepted outside development.
+// MinJWTSecretBytes is the shortest JWT_SECRET that passes without a warning
+// outside development.
 const MinJWTSecretBytes = 32
 
 // Validate returns a fatal configuration error, for the caller to refuse to
 // start on. Outside ENV=development/test a set JWT_SECRET must not be the
-// published placeholder and must be at least MinJWTSecretBytes long. An unset
+// published placeholder: anyone could forge session tokens with it. An unset
 // secret is allowed: it disables user sign-in entirely (internal/api/auth.go),
 // so there is nothing to forge.
 func (c Config) Validate() error {
@@ -225,9 +226,6 @@ func (c Config) Validate() error {
 	}
 	if c.JWTSecret == PlaceholderJWTSecret {
 		return fmt.Errorf("JWT_SECRET is the placeholder from .env.example; generate a real one (e.g. openssl rand -hex 32)")
-	}
-	if len(c.JWTSecret) < MinJWTSecretBytes {
-		return fmt.Errorf("JWT_SECRET is %d bytes; need at least %d outside development", len(c.JWTSecret), MinJWTSecretBytes)
 	}
 	return nil
 }
@@ -255,6 +253,18 @@ func (c Config) Validate() error {
 // an operator who sees neither warning knows the two settings agree.
 func (c Config) Warnings() []string {
 	var out []string
+
+	// A short JWT_SECRET warns rather than refuses so that adding this check can
+	// never take an existing deployment down; a random secret of any reasonable
+	// length is not brute-forceable, and length is a proxy for "typed by a
+	// person". The published placeholder is refused outright by Validate.
+	if c.Env != "development" && c.Env != "test" && c.JWTSecret != "" &&
+		c.JWTSecret != PlaceholderJWTSecret && len(c.JWTSecret) < MinJWTSecretBytes {
+		out = append(out, fmt.Sprintf(
+			"JWT_SECRET is %d bytes; use at least %d random bytes (e.g. openssl rand -hex 32)",
+			len(c.JWTSecret), MinJWTSecretBytes,
+		))
+	}
 
 	if !c.UsesR2() && c.ImageBaseURL != "" {
 		out = append(out, fmt.Sprintf(

@@ -115,7 +115,7 @@ func TestValidate_JWTSecret(t *testing.T) {
 		wantErr bool
 	}{
 		{"production placeholder", "production", config.PlaceholderJWTSecret, true},
-		{"production short", "production", strings.Repeat("x", config.MinJWTSecretBytes-1), true},
+		{"production short only warns", "production", strings.Repeat("x", config.MinJWTSecretBytes-1), false},
 		{"production exact minimum", "production", long, false},
 		{"production unset disables sign-in", "production", "", false},
 		{"staging placeholder", "staging", config.PlaceholderJWTSecret, true},
@@ -129,5 +129,28 @@ func TestValidate_JWTSecret(t *testing.T) {
 				t.Fatalf("Validate() error = %v, wantErr %v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestWarnings_ShortJWTSecret(t *testing.T) {
+	jwtWarning := func(c config.Config) bool {
+		for _, w := range c.Warnings() {
+			if strings.HasPrefix(w, "JWT_SECRET is") {
+				return true
+			}
+		}
+		return false
+	}
+	if !jwtWarning(config.Config{Env: "production", JWTSecret: strings.Repeat("x", config.MinJWTSecretBytes-1)}) {
+		t.Fatal("no JWT_SECRET warning for a short production secret")
+	}
+	for _, c := range []config.Config{
+		{Env: "production", JWTSecret: strings.Repeat("x", config.MinJWTSecretBytes)},
+		{Env: "production", JWTSecret: ""},
+		{Env: "development", JWTSecret: "abc"},
+	} {
+		if jwtWarning(c) {
+			t.Errorf("JWT_SECRET warning for env %q with a %d-byte secret, want none", c.Env, len(c.JWTSecret))
+		}
 	}
 }
