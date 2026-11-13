@@ -4,26 +4,22 @@ A community-maintained, open exercise database platform — "OpenFoodFacts but f
 
 ## Why this exists
 
-Fitness apps that want a free exercise catalog today lean on
-[`yuhonas/free-exercise-db`](https://github.com/yuhonas/free-exercise-db) — a great
-public-domain (Unlicense) dataset of ~800 exercises, but its GitHub repo has PRs sitting
-unmerged for months, with no active review queue. Other options exist but none combine what
-a real "OpenFoodFacts for fitness" needs:
+OpenFoodFacts, but for fitness: one open exercise catalog with community submissions and a
+moderation queue, translations, versioned and revertible revisions, a CC0 data license, and an
+API-first documented surface.
 
-- **[wger.de](https://wger.de)** — live, actively maintained (6.5k★, same-day PR merges),
-  has its own exercise API and contribution/moderation workflow. The closest prior art, but
-  it's a full self-hosted fitness *tracker* app (not a focused exercise-DB microservice), and
-  its data is CC-BY-SA 4.0 (share-alike), not the friction-free CC0 this project targets.
-- **[exercemus/exercises](https://github.com/exercemus/exercises)** — aggregates
-  exercemus.com + wger.de + free-exercise-db into a dataset, including image URLs and
-  embeddable YouTube links. Closest attempt at "the thing," but it's a static generated JSON
-  dataset: no live moderation queue, no translations, no versioned/revertible revisions.
-- **[ExerciseDB](https://github.com/ExerciseDB/exercisedb-api)** (RapidAPI) — 11,000+
-  exercises but a closed, commercially-monetized dataset, not community-contributed.
+Related projects, and how this one relates to them:
 
-None combine: open community submission + moderation queue, translations, versioned/
-revertible revisions, a CC0 data license, and an API-first documented surface. That's the gap
-this project fills.
+- **[yuhonas/free-exercise-db](https://github.com/yuhonas/free-exercise-db)**: a public-domain
+  (Unlicense) dataset of ~800 exercises with images. It is this project's day-one seed.
+- **[wger](https://wger.de)**: a self-hosted fitness tracker with its own exercise API and
+  contribution workflow. Its data is CC-BY-SA 4.0, so it is a reference for spotting gaps and
+  is never imported into a CC0 catalog.
+- **[exercemus/exercises](https://github.com/exercemus/exercises)**: a generated dataset that
+  aggregates exercemus.com, wger and free-exercise-db. It includes wger data, so it is a
+  gap-finding reference only.
+- **[ExerciseDB](https://github.com/ExerciseDB/exercisedb-api)**: a large commercial exercise
+  API.
 
 ## Core principles
 

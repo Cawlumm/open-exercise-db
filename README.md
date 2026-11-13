@@ -19,17 +19,11 @@
 
 ## Why this exists
 
-Fitness apps that want a free exercise catalog today mostly lean on
-[`yuhonas/free-exercise-db`](https://github.com/yuhonas/free-exercise-db) — a great
-public-domain dataset of ~800 exercises, but its GitHub repo has PRs sitting unmerged for
-months, with no active review queue behind it.
-
-Other prior art exists — [wger.de](https://wger.de) (a full self-hosted fitness tracker with
-its own CC-BY-SA exercise wiki), [exercemus/exercises](https://github.com/exercemus/exercises)
-(a static dataset aggregating wger + free-exercise-db), and commercial APIs like ExerciseDB —
-but none combine an open community submission + moderation queue, translations, versioned/
-revertible revisions, a CC0 data license, and an API-first documented surface. That's the gap
-this project fills.
+open-exercise-db is OpenFoodFacts, but for fitness: an open, community-maintained catalog of
+exercises that any app can build on. Anyone can submit an exercise or a fix, moderators review
+it, every published change is versioned and revertible, names and instructions are
+translatable, the data is CC0, and the whole thing is a documented API. The projects it builds
+on are credited under [Sources and related projects](#sources-and-related-projects).
 
 Full design rationale, data model, and phased build plan: **[`docs/DESIGN.md`](docs/DESIGN.md)**.
 
