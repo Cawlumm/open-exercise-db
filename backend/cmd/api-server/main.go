@@ -144,6 +144,7 @@ func main() {
 	authCfg := api.AuthConfig{
 		JWTSecret:         cfg.JWTSecret,
 		AdminGitHubLogins: cfg.AdminGitHubLogins,
+		TrustedProxyMode:  cfg.TrustedProxyMode,
 		GitHubOAuth: auth.GitHubOAuth{
 			ClientID:     cfg.GitHubClientID,
 			ClientSecret: cfg.GitHubClientSecret,

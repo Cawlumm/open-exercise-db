@@ -87,6 +87,14 @@ type AuthConfig struct {
 	// login without a redeploy — which matters when the reason you are
 	// changing it is that you locked yourself out.
 	AdminGitHubLogins string
+
+	// TrustedProxyMode selects how a request's client address is derived (see
+	// clientKey). Empty means direct: no forwarding header is believed.
+	TrustedProxyMode string
+
+	// unknownKeys remembers recently-seen key ids that are not in the database;
+	// set by appAuthMiddleware.
+	unknownKeys *negativeKeyCache
 }
 
 // appContextKey is where an authenticated app is stashed for handlers.
@@ -154,6 +162,7 @@ func AppFromContext(ctx context.Context) (model.App, bool) {
 // second code path. Authorization ("may this app write right now?") runs only
 // where a write demands it, and is where suspension is enforced.
 func appAuthMiddleware(hapi huma.API, s *store.Store, cfg AuthConfig) func(huma.Context, func(huma.Context)) {
+	cfg.unknownKeys = newNegativeKeyCache(negativeKeyTTL, negativeKeyMax)
 	return func(ctx huma.Context, next func(huma.Context)) {
 		op := ctx.Operation()
 		required := authRequiredFor(op)
@@ -258,7 +267,7 @@ func appAuthMiddleware(hapi huma.API, s *store.Store, cfg AuthConfig) func(huma.
 // right *kind* of credential.
 func authenticate(ctx huma.Context, s *store.Store, cfg AuthConfig, token string) (*model.App, *model.User, error) {
 	if strings.HasPrefix(token, auth.AppTokenPrefix) {
-		app, err := authenticateApp(ctx, s, token)
+		app, err := authenticateApp(ctx, s, cfg.unknownKeys, token)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -311,15 +320,25 @@ var errBadCredential = errors.New("bad app credential")
 // A single store call fetches the row and its hash together: this runs on
 // every authenticated request, and two round trips here would halve the rate
 // the connection pool can sustain.
-func authenticateApp(ctx huma.Context, s *store.Store, token string) (model.App, error) {
+func authenticateApp(ctx huma.Context, s *store.Store, unknown *negativeKeyCache, token string) (model.App, error) {
 	keyID, secret, err := auth.ParseToken(token)
 	if err != nil {
+		return model.App{}, errBadCredential
+	}
+
+	// A key id that was just looked up and not found is answered without
+	// another query. Real key ids are random, so one missing a moment ago does
+	// not appear a moment later; this stops a loop of forged ids that stays
+	// under the flood guard from costing a query each.
+	if unknown.seen(keyID, time.Now()) {
+		auth.VerifySecret(secret, unknownKeyHash)
 		return model.App{}, errBadCredential
 	}
 
 	app, hash, err := s.Apps.GetByKeyIDWithHash(ctx.Context(), keyID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			unknown.add(keyID, time.Now())
 			// Verify against a hash that cannot match, rather than returning
 			// here. An early return would make "unknown key id" measurably
 			// faster than "wrong secret", turning response time into an

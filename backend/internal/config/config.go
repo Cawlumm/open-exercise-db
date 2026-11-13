@@ -27,6 +27,11 @@ type Config struct {
 	JWTSecret         string
 	AdminGitHubLogins string
 
+	// TrustedProxyMode says which proxy in front of the process, if any, may be
+	// believed about the client's address: ProxyCloudRun, ProxyCloudflare or
+	// ProxyDirect. See DefaultTrustedProxyMode and docs/DEPLOYMENT.md.
+	TrustedProxyMode string
+
 	// Cloudflare R2 object storage (Phase 2).
 	R2AccountID       string
 	R2AccessKeyID     string
@@ -139,6 +144,7 @@ func Load() Config {
 		GitHubRedirectURL:  os.Getenv("GITHUB_OAUTH_REDIRECT_URL"),
 		JWTSecret:          os.Getenv("JWT_SECRET"),
 		AdminGitHubLogins:  os.Getenv("ADMIN_GITHUB_LOGINS"),
+		TrustedProxyMode:   strings.ToLower(strings.TrimSpace(getEnv("TRUSTED_PROXY_MODE", DefaultTrustedProxyMode()))),
 
 		R2AccountID:       os.Getenv("R2_ACCOUNT_ID"),
 		R2AccessKeyID:     os.Getenv("R2_ACCESS_KEY_ID"),
@@ -197,6 +203,28 @@ func Load() Config {
 	}
 }
 
+// Values of TRUSTED_PROXY_MODE.
+const (
+	// ProxyDirect trusts no forwarding header: the TCP peer is the client.
+	ProxyDirect = "direct"
+	// ProxyCloudRun trusts the right-most X-Forwarded-For entry, the one Google's
+	// front end appends. Everything to its left is client-supplied.
+	ProxyCloudRun = "cloudrun"
+	// ProxyCloudflare trusts CF-Connecting-IP. Only correct when Cloudflare is
+	// the sole path to the origin; otherwise any client can set it.
+	ProxyCloudflare = "cloudflare"
+)
+
+// DefaultTrustedProxyMode is cloudrun when K_SERVICE is set (Cloud Run sets it on
+// every revision) and direct everywhere else, so no deployment trusts a header
+// it has not been told to.
+func DefaultTrustedProxyMode() string {
+	if os.Getenv("K_SERVICE") != "" {
+		return ProxyCloudRun
+	}
+	return ProxyDirect
+}
+
 // UsesR2 reports whether the R2 object-storage backend is fully configured.
 // Mirrors internal/media.NewStore's own all-four-or-none rule; a partial
 // configuration reports false here but is a hard error there, so callers
@@ -221,6 +249,12 @@ const MinJWTSecretBytes = 32
 // secret is allowed: it disables user sign-in entirely (internal/api/auth.go),
 // so there is nothing to forge.
 func (c Config) Validate() error {
+	switch c.TrustedProxyMode {
+	case "", ProxyDirect, ProxyCloudRun, ProxyCloudflare:
+	default:
+		return fmt.Errorf("TRUSTED_PROXY_MODE=%q is not one of %s, %s, %s",
+			c.TrustedProxyMode, ProxyDirect, ProxyCloudRun, ProxyCloudflare)
+	}
 	if c.Env == "development" || c.Env == "test" || c.JWTSecret == "" {
 		return nil
 	}

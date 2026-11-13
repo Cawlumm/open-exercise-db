@@ -154,3 +154,22 @@ func TestWarnings_ShortJWTSecret(t *testing.T) {
 		}
 	}
 }
+
+func TestTrustedProxyMode(t *testing.T) {
+	t.Setenv("TRUSTED_PROXY_MODE", "")
+	t.Setenv("K_SERVICE", "")
+	if got := config.Load().TrustedProxyMode; got != config.ProxyDirect {
+		t.Errorf("default off Cloud Run = %q, want direct", got)
+	}
+	t.Setenv("K_SERVICE", "oedb-api")
+	if got := config.Load().TrustedProxyMode; got != config.ProxyCloudRun {
+		t.Errorf("default on Cloud Run = %q, want cloudrun", got)
+	}
+	t.Setenv("TRUSTED_PROXY_MODE", " Cloudflare ")
+	if got := config.Load().TrustedProxyMode; got != config.ProxyCloudflare {
+		t.Errorf("explicit mode = %q, want cloudflare", got)
+	}
+	if err := (config.Config{Env: "development", TrustedProxyMode: "bogus"}).Validate(); err == nil {
+		t.Error("Validate accepted an unknown TRUSTED_PROXY_MODE")
+	}
+}
