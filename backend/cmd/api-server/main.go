@@ -89,6 +89,14 @@ func main() {
 		log.Printf("config warning: %s", w)
 	}
 
+	if admins, err := stores.Users.AdminGitHubIDs(ctx); err != nil {
+		log.Printf("config warning: list admins: %v", err)
+	} else {
+		for _, w := range cfg.AdminWarnings(admins) {
+			log.Printf("config warning: %s", w)
+		}
+	}
+
 	// exportCache is constructed here, not inside internal/api, per
 	// docs/CONVENTIONS.md section 2's DI pattern — same shape as mediaStore
 	// above. It's owned by main so a future Phase 2 wiring (e.g. calling

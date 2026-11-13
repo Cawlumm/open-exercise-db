@@ -3,6 +3,7 @@ package config_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Cawlumm/open-exercise-db/internal/config"
 )
@@ -201,5 +202,54 @@ func TestAdminGitHubIDs(t *testing.T) {
 	}
 	if has(config.Config{AdminGitHubIDs: "1"}, "deprecated") {
 		t.Error("warned with only ids set")
+	}
+}
+
+func TestWarnings_DirectModeInProductionWarns(t *testing.T) {
+	cases := map[string]struct {
+		c    config.Config
+		warn bool
+	}{
+		"production direct":     {config.Config{Env: "production", TrustedProxyMode: config.ProxyDirect}, true},
+		"production unset mode": {config.Config{Env: "production"}, true},
+		"production cloudrun":   {config.Config{Env: "production", TrustedProxyMode: config.ProxyCloudRun}, false},
+		"production cloudflare": {config.Config{Env: "production", TrustedProxyMode: config.ProxyCloudflare}, false},
+		"development direct":    {config.Config{Env: "development", TrustedProxyMode: config.ProxyDirect}, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := false
+			for _, w := range tc.c.Warnings() {
+				if strings.Contains(w, "TRUSTED_PROXY_MODE") {
+					got = true
+				}
+			}
+			if got != tc.warn {
+				t.Errorf("proxy warning = %v, want %v (%v)", got, tc.warn, tc.c.Warnings())
+			}
+		})
+	}
+}
+
+func TestAdminWarnings(t *testing.T) {
+	c := config.Config{AdminGitHubIDs: "1, 2"}
+	if w := c.AdminWarnings([]string{"1", "2"}); len(w) != 0 {
+		t.Errorf("listed admins warned: %v", w)
+	}
+	w := c.AdminWarnings([]string{"1", "99"})
+	if len(w) != 1 || !strings.Contains(w[0], "99") {
+		t.Errorf("warnings = %v, want one naming 99", w)
+	}
+	if w := (config.Config{}).AdminWarnings([]string{"99"}); len(w) != 0 {
+		t.Errorf("no authoritative list must not warn: %v", w)
+	}
+}
+
+func TestLoginPromotionAllowed(t *testing.T) {
+	if !config.LoginPromotionAllowed(config.LoginPromotionSunset.Add(-time.Second)) {
+		t.Error("promotion refused before the sunset")
+	}
+	if config.LoginPromotionAllowed(config.LoginPromotionSunset) {
+		t.Error("promotion allowed at the sunset")
 	}
 }

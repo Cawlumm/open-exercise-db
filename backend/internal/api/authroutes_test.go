@@ -9,11 +9,13 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2/humatest"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Cawlumm/open-exercise-db/internal/auth"
+	"github.com/Cawlumm/open-exercise-db/internal/config"
 	"github.com/Cawlumm/open-exercise-db/internal/export"
 	"github.com/Cawlumm/open-exercise-db/internal/media"
 	"github.com/Cawlumm/open-exercise-db/internal/ratelimit"
@@ -52,6 +54,11 @@ func newSignInAPI(t *testing.T, adminLogins, ghLogin string, ghID int64) (*store
 
 func newSignInAPIWithAdmins(t *testing.T, adminIDs, adminLogins, ghLogin string, ghID int64) (*store.Store, *pgxpool.Pool, humatest.TestAPI) {
 	t.Helper()
+	// Fixed to the far future so a test of the login fallback does not start
+	// failing on the real sunset date; the sunset has its own test below.
+	sunset := config.LoginPromotionSunset
+	config.LoginPromotionSunset = time.Date(2999, 1, 1, 0, 0, 0, 0, time.UTC)
+	t.Cleanup(func() { config.LoginPromotionSunset = sunset })
 	s, pool := newTestStore(t)
 
 	limiter := ratelimit.NewLimiter(ratelimit.Config{
@@ -302,6 +309,11 @@ func TestSignIn_AdminByNumericID(t *testing.T) {
 
 	t.Run("an admin not on the list is demoted at sign-in", func(t *testing.T) {
 		s, pool, api := newSignInAPIWithAdmins(t, "111", "", "former-admin", 555)
+		if _, err := s.Users.UpsertGitHubUser(context.Background(), store.UpsertGitHubUserInput{
+			GitHubID: "111", Username: "listed", PromoteToAdmin: true,
+		}); err != nil {
+			t.Fatalf("seed listed admin: %v", err)
+		}
 		_, userID, _ := signIn(t, api)
 		if _, err := pool.Exec(context.Background(), `UPDATE users SET role = 'admin' WHERE id = $1`, userID); err != nil {
 			t.Fatalf("set admin: %v", err)
@@ -329,6 +341,25 @@ func TestSignIn_AdminByNumericID(t *testing.T) {
 		_, _, api := newSignInAPIWithAdmins(t, "", "legacy-admin", "legacy-admin", 557)
 		if _, _, role := signIn(t, api); role != "admin" {
 			t.Fatalf("role = %q, want admin", role)
+		}
+	})
+
+	t.Run("the last admin is not demoted by a list that omits them", func(t *testing.T) {
+		_, pool, api := newSignInAPIWithAdmins(t, "111", "", "only-admin", 558)
+		_, userID, _ := signIn(t, api)
+		if _, err := pool.Exec(context.Background(), `UPDATE users SET role = 'admin' WHERE id = $1`, userID); err != nil {
+			t.Fatalf("set admin: %v", err)
+		}
+		if _, _, role := signIn(t, api); role != "admin" {
+			t.Fatalf("role = %q, want admin (last admin must survive a mistyped list)", role)
+		}
+	})
+
+	t.Run("deprecated logins stop promoting after the sunset", func(t *testing.T) {
+		_, _, api := newSignInAPIWithAdmins(t, "", "legacy-admin", "legacy-admin", 559)
+		config.LoginPromotionSunset = time.Now().Add(-time.Hour)
+		if _, _, role := signIn(t, api); role != "contributor" {
+			t.Fatalf("role = %q, want contributor", role)
 		}
 	})
 }

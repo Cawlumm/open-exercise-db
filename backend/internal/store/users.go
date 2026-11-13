@@ -48,7 +48,9 @@ type UpsertGitHubUserInput struct {
 // set, which the handler does only when ADMIN_GITHUB_IDS is configured. With no
 // authoritative list a typo in the env var — or a deploy that forgets it —
 // would otherwise strip admin from everyone the next time they sign in, which
-// is exactly when nobody is watching.
+// is exactly when nobody is watching. The same reasoning refuses to demote the
+// last admin even with an authoritative list: a list that names the wrong
+// numeric ids is still a typo, and it would otherwise leave no one able to fix it.
 func (s *UserStore) UpsertGitHubUser(ctx context.Context, in UpsertGitHubUserInput) (model.User, error) {
 	query := fmt.Sprintf(`
 		INSERT INTO users (github_id, username, avatar_url, role)
@@ -57,7 +59,9 @@ func (s *UserStore) UpsertGitHubUser(ctx context.Context, in UpsertGitHubUserInp
 		SET username   = EXCLUDED.username,
 		    avatar_url = EXCLUDED.avatar_url,
 		    role       = CASE WHEN $4::boolean THEN 'admin'
-		                      WHEN $5::boolean AND users.role = 'admin' THEN 'contributor'
+		                      WHEN $5::boolean AND users.role = 'admin'
+		                           AND EXISTS (SELECT 1 FROM users o WHERE o.role = 'admin' AND o.id <> users.id)
+		                           THEN 'contributor'
 		                      ELSE users.role END
 		RETURNING %s`, userColumns)
 
@@ -100,4 +104,23 @@ func (s *UserStore) SetRole(ctx context.Context, id, role string) error {
 		return fmt.Errorf("set user %s role: no such user", id)
 	}
 	return nil
+}
+
+// AdminGitHubIDs returns the github_id of every current admin, for the startup
+// check that compares them with ADMIN_GITHUB_IDS.
+func (s *UserStore) AdminGitHubIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT github_id FROM users WHERE role = 'admin' ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("list admin github ids: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan admin github id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/Cawlumm/open-exercise-db/internal/auth"
+	"github.com/Cawlumm/open-exercise-db/internal/config"
 	"github.com/Cawlumm/open-exercise-db/internal/model"
 	"github.com/Cawlumm/open-exercise-db/internal/ratelimit"
 	"github.com/Cawlumm/open-exercise-db/internal/store"
@@ -155,8 +156,10 @@ func registerAuthRoutes(hapi huma.API, s *store.Store, cfg AuthConfig) {
 			promote = ids[ghID]
 			demote = !promote
 		} else {
-			// Deprecated fallback; usernames can be renamed and re-registered.
-			promote = model.AdminLogins(cfg.AdminGitHubLogins)[lower(ghUser.Login)]
+			// Deprecated fallback; usernames can be renamed and re-registered,
+			// so it stops working at config.LoginPromotionSunset.
+			promote = config.LoginPromotionAllowed(time.Now()) &&
+				model.AdminLogins(cfg.AdminGitHubLogins)[lower(ghUser.Login)]
 		}
 		user, err := s.Users.UpsertGitHubUser(ctx, store.UpsertGitHubUserInput{
 			GitHubID:       ghID,

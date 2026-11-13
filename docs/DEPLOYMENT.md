@@ -745,9 +745,24 @@ Production runs on Cloud Run with no CDN in front, so it uses the `cloudrun` def
 `cloudflare` only together with the edge proxy described below. Buckets remain per-instance and
 `--max-instances=4` still bounds the blast radius; the origin limiter is a backstop.
 
-An unknown app `key_id` is looked up once and then remembered for 30 seconds, on top of the
-per-address flood guard that runs before authentication, so forged credentials do not each
-cost a database query.
+Forged app credentials are bounded by the per-address flood guard that runs before
+authentication. An unknown `key_id` is also remembered for 30 seconds, but that only saves the
+query when the same id repeats; a fresh random id each request still costs one indexed lookup
+until the flood guard answers 429.
+
+**Upgrading from a release without `TRUSTED_PROXY_MODE`.** The default is now `direct`, which
+buckets every client on the TCP peer. Behind nginx, Traefik, a compose proxy or any load balancer
+that peer is the proxy, so all clients share one bucket and the whole install gets 429 once the
+aggregate limit is hit. Outside Cloud Run, a non-development `ENV` logs a startup warning while the
+mode is `direct`. Set the mode to match what is in front: `cloudrun` only when Google's front end
+is the last hop (behind your own global load balancer or Cloudflare the right-most entry is that
+hop, not the client, so the same collapse happens), `cloudflare` only when Cloudflare is the sole
+path to the origin.
+
+**Admin list.** `ADMIN_GITHUB_LOGINS` stops promoting anyone on 2027-03-01 (startup logs the
+date); move to `ADMIN_GITHUB_IDS` before then. At startup, any current admin missing from
+`ADMIN_GITHUB_IDS` is logged, and the last remaining admin is never demoted, so a mistyped id
+cannot lock everyone out.
 
 **No Cloudflare in front.** `docs/DESIGN.md` calls for an edge cache ahead of the Cloud Run
 origin, which is also where the real rate limiting in `docs/API_POLICY.md` is meant to live.

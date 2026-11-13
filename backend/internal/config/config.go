@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config holds every runtime setting. Populated once at startup and passed
@@ -222,6 +223,16 @@ const (
 	ProxyCloudflare = "cloudflare"
 )
 
+// LoginPromotionSunset is the instant after which ADMIN_GITHUB_LOGINS no longer
+// promotes anyone. A login is renameable and can be re-registered by someone
+// else, so it is a standing way to become admin until the operator moves to
+// ADMIN_GITHUB_IDS; a date makes "later" finite.
+var LoginPromotionSunset = time.Date(2027, time.March, 1, 0, 0, 0, 0, time.UTC)
+
+// LoginPromotionAllowed reports whether login-based admin promotion still
+// applies at now.
+func LoginPromotionAllowed(now time.Time) bool { return now.Before(LoginPromotionSunset) }
+
 // DefaultTrustedProxyMode is cloudrun when K_SERVICE is set (Cloud Run sets it on
 // every revision) and direct everywhere else, so no deployment trusts a header
 // it has not been told to.
@@ -230,6 +241,29 @@ func DefaultTrustedProxyMode() string {
 		return ProxyCloudRun
 	}
 	return ProxyDirect
+}
+
+// AdminWarnings compares the admins already in the database (their github_id)
+// with ADMIN_GITHUB_IDS. An authoritative list that omits a current admin
+// demotes them at their next sign-in, which is what a mistyped id looks like
+// from the outside, so the operator is told at startup while they can still fix it.
+func (c Config) AdminWarnings(current []string) []string {
+	listed := map[string]bool{}
+	for _, id := range strings.Split(c.AdminGitHubIDs, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			listed[id] = true
+		}
+	}
+	if len(listed) == 0 {
+		return nil
+	}
+	var out []string
+	for _, id := range current {
+		if !listed[id] {
+			out = append(out, fmt.Sprintf("current admin with github_id %s is not in ADMIN_GITHUB_IDS and will be demoted at next sign-in (the last remaining admin is never demoted)", id))
+		}
+	}
+	return out
 }
 
 // UsesR2 reports whether the R2 object-storage backend is fully configured.
@@ -306,8 +340,17 @@ func (c Config) Warnings() []string {
 		if strings.TrimSpace(c.AdminGitHubIDs) != "" {
 			out = append(out, "ADMIN_GITHUB_LOGINS is deprecated and is ignored because ADMIN_GITHUB_IDS is set; remove it")
 		} else {
-			out = append(out, "ADMIN_GITHUB_LOGINS is deprecated: usernames can be renamed and re-registered. Set ADMIN_GITHUB_IDS to numeric GitHub user ids instead")
+			out = append(out, fmt.Sprintf("ADMIN_GITHUB_LOGINS is deprecated: usernames can be renamed and re-registered, and it stops promoting anyone on %s. Set ADMIN_GITHUB_IDS to numeric GitHub user ids instead", LoginPromotionSunset.Format("2006-01-02")))
 		}
+	}
+
+	// direct is the default, and behind a reverse proxy it buckets every client
+	// on the proxy's address, so one busy client rate-limits the whole install.
+	// This process cannot tell a proxy from a client, so it says so rather than
+	// guessing.
+	if c.Env != "" && c.Env != "development" && c.Env != "test" &&
+		(c.TrustedProxyMode == "" || c.TrustedProxyMode == ProxyDirect) {
+		out = append(out, "TRUSTED_PROXY_MODE is direct, so every request is rate-limited by its TCP peer address. If a reverse proxy, load balancer or CDN sits in front of this process, all clients share one bucket; set TRUSTED_PROXY_MODE (cloudrun or cloudflare) to match it. Ignore this if clients connect directly")
 	}
 
 	// A short JWT_SECRET warns rather than refuses so that adding this check can
