@@ -17,14 +17,18 @@ import (
 )
 
 type fakeAPI struct {
-	en        []string
-	locales   map[string][]string // non-en code -> ids
-	status    int                 // non-zero: every request answers this
-	total     map[string]int      // override reported totals
-	fail429   int32               // number of initial 429s
-	badStatus string
-	hits      int32
-	uas       []string
+	en         []string
+	locales    map[string][]string // non-en code -> ids
+	status     int                 // non-zero: every request answers this
+	total      map[string]int      // override reported totals
+	fail429    int32               // number of initial 429s
+	badStatus  string
+	fail5xx    int32
+	retryHdr   string
+	noStatus   bool
+	noLocTotal bool
+	hits       int32
+	uas        []string
 }
 
 func ex(id string) string {
@@ -39,16 +43,27 @@ func (f *fakeAPI) handler() http.Handler {
 			w.WriteHeader(f.status)
 			return
 		}
+		if atomic.LoadInt32(&f.fail5xx) > 0 {
+			atomic.AddInt32(&f.fail5xx, -1)
+			w.WriteHeader(503)
+			return
+		}
 		if atomic.LoadInt32(&f.fail429) > 0 {
 			atomic.AddInt32(&f.fail429, -1)
-			w.Header().Set("Retry-After", "999")
+			hdr := f.retryHdr
+			if hdr == "" {
+				hdr = "999"
+			}
+			w.Header().Set("Retry-After", hdr)
 			w.WriteHeader(429)
 			return
 		}
 		body := func(ids []string, key string, total int) {
 			var parts []string
 			for _, id := range ids {
-				if f.badStatus != "" {
+				if f.noStatus {
+					parts = append(parts, strings.Replace(ex(id), `"status":"published",`, "", 1))
+				} else if f.badStatus != "" {
 					parts = append(parts, strings.Replace(ex(id), "published", f.badStatus, 1))
 				} else {
 					parts = append(parts, ex(id))
@@ -65,6 +80,10 @@ func (f *fakeAPI) handler() http.Handler {
 			ls = append(ls, `{"code":"en"}`)
 			for c := range f.locales {
 				ls = append(ls, fmt.Sprintf(`{"code":%q}`, c))
+			}
+			if f.noLocTotal {
+				fmt.Fprintf(w, `{"locales":[%s]}`, strings.Join(ls, ","))
+				return
 			}
 			fmt.Fprintf(w, `{"locales":[%s],"total":%d}`, strings.Join(ls, ","), len(ls))
 		case "/api/v1/exercises/export":
@@ -97,7 +116,7 @@ func run(t *testing.T, f *fakeAPI, out string, confirm bool) (*Result, *Config, 
 	cfg := &Config{
 		API: srv.URL, Out: out, ConfirmRemovals: confirm,
 		Now:   func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
-		Sleep: func(d time.Duration) { slept = append(slept, d) },
+		Sleep: func(_ context.Context, d time.Duration) error { slept = append(slept, d); return nil },
 	}
 	res, err := Build(context.Background(), cfg)
 	t.Logf("slept=%v", slept)
@@ -203,13 +222,15 @@ func TestChangedCatalogKeepsOldDataFiles(t *testing.T) {
 
 func TestRefusals(t *testing.T) {
 	cases := map[string]func(f *fakeAPI){
-		"http error":      func(f *fakeAPI) { f.status = 500 },
-		"count != total":  func(f *fakeAPI) { f.total = map[string]int{"en": 5} },
-		"zero exercises":  func(f *fakeAPI) { f.en = nil; f.locales = map[string][]string{} },
-		"duplicate ids":   func(f *fakeAPI) { f.en = []string{"a", "a", "b"} },
-		"locale id drift": func(f *fakeAPI) { f.locales["es"] = []string{"a", "b", "zzz"} },
-		"locale missing":  func(f *fakeAPI) { f.locales["es"] = []string{"a", "b"} },
-		"unpublished":     func(f *fakeAPI) { f.badStatus = "draft" },
+		"http error":       func(f *fakeAPI) { f.status = 500 },
+		"count != total":   func(f *fakeAPI) { f.total = map[string]int{"en": 5} },
+		"zero exercises":   func(f *fakeAPI) { f.en = nil; f.locales = map[string][]string{} },
+		"duplicate ids":    func(f *fakeAPI) { f.en = []string{"a", "a", "b"} },
+		"locale id drift":  func(f *fakeAPI) { f.locales["es"] = []string{"a", "b", "zzz"} },
+		"locale missing":   func(f *fakeAPI) { f.locales["es"] = []string{"a", "b"} },
+		"unpublished":      func(f *fakeAPI) { f.badStatus = "draft" },
+		"status missing":   func(f *fakeAPI) { f.noStatus = true },
+		"locales no total": func(f *fakeAPI) { f.noLocTotal = true },
 	}
 	for name, mut := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -246,7 +267,7 @@ func Test429RetryAfter(t *testing.T) {
 	srv := httptest.NewServer(f.handler())
 	defer srv.Close()
 	var slept []time.Duration
-	cfg := &Config{API: srv.URL, Out: t.TempDir(), Sleep: func(d time.Duration) { slept = append(slept, d) }}
+	cfg := &Config{API: srv.URL, Out: t.TempDir(), Sleep: func(_ context.Context, d time.Duration) error { slept = append(slept, d); return nil }}
 	if _, err := Build(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +279,7 @@ func Test429RetryAfter(t *testing.T) {
 	f2.fail429 = 99
 	srv2 := httptest.NewServer(f2.handler())
 	defer srv2.Close()
-	cfg2 := &Config{API: srv2.URL, Out: t.TempDir(), Sleep: func(time.Duration) {}}
+	cfg2 := &Config{API: srv2.URL, Out: t.TempDir(), Sleep: func(context.Context, time.Duration) error { return nil }}
 	if _, err := Build(context.Background(), cfg2); err == nil || f2.hits != 3 {
 		t.Fatalf("expected failure after 3 tries, hits=%d err=%v", f2.hits, err)
 	}
@@ -367,5 +388,94 @@ func TestPublishedAtHeartbeat(t *testing.T) {
 	m = read()
 	if m.GeneratedAt != t2.Format(time.RFC3339) || m.PublishedAt != m.GeneratedAt {
 		t.Fatalf("content change must bump both: %+v", m)
+	}
+}
+
+func manifestPath(out string) string { return filepath.Join(out, "v1", "manifest.json") }
+
+func TestUnreadableManifestRefuses(t *testing.T) {
+	out := t.TempDir()
+	os.MkdirAll(filepath.Join(out, "v1"), 0o755)
+	os.WriteFile(manifestPath(out), []byte("{not json"), 0o644)
+	if _, _, err := run(t, newAPI(), out, true); err == nil || !strings.Contains(err.Error(), "unreadable") {
+		t.Fatalf("expected refusal even with confirm, got %v", err)
+	}
+	os.Remove(manifestPath(out))
+	os.Mkdir(manifestPath(out), 0o755) // exists but cannot be read as a file
+	if _, _, err := run(t, newAPI(), out, false); err == nil {
+		t.Fatal("expected refusal for unreadable manifest path")
+	}
+}
+
+func TestDroppedLocaleRefused(t *testing.T) {
+	out := t.TempDir()
+	f := newAPI()
+	if _, _, err := run(t, f, out, false); err != nil {
+		t.Fatal(err)
+	}
+	f.locales = map[string][]string{}
+	_, _, err := run(t, f, out, false)
+	if err == nil || !strings.Contains(err.Error(), "locale es") {
+		t.Fatalf("expected dropped-locale refusal, got %v", err)
+	}
+	res, _, err := run(t, f, out, true)
+	if err != nil || !res.Changed || len(res.Locales) != 1 {
+		t.Fatalf("confirm should allow: %v", err)
+	}
+}
+
+func TestTransient5xxRetriedOnce(t *testing.T) {
+	f := newAPI()
+	f.fail5xx = 1
+	if _, _, err := run(t, f, t.TempDir(), false); err != nil {
+		t.Fatalf("one 5xx should be retried: %v", err)
+	}
+	f2 := newAPI()
+	f2.fail5xx = 2
+	srv := httptest.NewServer(f2.handler())
+	defer srv.Close()
+	cfg := &Config{API: srv.URL, Out: t.TempDir(), Sleep: func(context.Context, time.Duration) error { return nil }}
+	if _, err := Build(context.Background(), cfg); err == nil || f2.hits != 2 {
+		t.Fatalf("two 5xx in a row should fail after one retry, hits=%d err=%v", f2.hits, err)
+	}
+}
+
+func TestNetworkErrorRetriedOnce(t *testing.T) {
+	var n int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&n, 1) == 1 {
+			hj, _ := w.(http.Hijacker)
+			c, _, _ := hj.Hijack()
+			c.Close()
+			return
+		}
+		fmt.Fprint(w, `{"locales":[],"total":0}`)
+	}))
+	defer srv.Close()
+	var dst listBody
+	cfg := &Config{API: srv.URL, Client: srv.Client(), Now: time.Now, Log: os.Stderr, Sleep: func(context.Context, time.Duration) error { return nil }}
+	if err := getJSON(context.Background(), cfg, "/x", &dst); err != nil || n != 2 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+}
+
+func TestRetryAfterHTTPDate(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if d := retryAfter(now.Add(30*time.Second).Format(http.TimeFormat), now); d != 30*time.Second {
+		t.Fatalf("got %v", d)
+	}
+	if d := retryAfter(now.Add(time.Hour).Format(http.TimeFormat), now); d != 60*time.Second {
+		t.Fatalf("cap: %v", d)
+	}
+	if d := retryAfter("junk", now); d != time.Second {
+		t.Fatalf("junk: %v", d)
+	}
+}
+
+func TestSleepIsContextAware(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := sleepCtx(ctx, time.Hour); err == nil {
+		t.Fatal("cancelled sleep must return")
 	}
 }

@@ -69,7 +69,7 @@ type Config struct {
 	ConfirmRemovals bool
 	Client          *http.Client
 	Now             func() time.Time
-	Sleep           func(time.Duration)
+	Sleep           func(context.Context, time.Duration) error
 	Log             io.Writer
 
 	Requests int // count of HTTP requests issued, filled in by Build
@@ -112,14 +112,18 @@ func Build(ctx context.Context, cfg *Config) (*Result, error) {
 		cfg.Now = time.Now
 	}
 	if cfg.Sleep == nil {
-		cfg.Sleep = time.Sleep
+		cfg.Sleep = sleepCtx
 	}
 	if cfg.Log == nil {
 		cfg.Log = io.Discard
 	}
 
+	old, err := readManifest(cfg.Out)
+	if err != nil {
+		return nil, fmt.Errorf("existing manifest is unreadable, refusing to skip the shrink guard: %w", err)
+	}
+
 	var cols []collection
-	var err error
 	for attempt := 1; attempt <= attemptsPerBuild; attempt++ {
 		cols, err = collect(ctx, cfg)
 		if err == nil {
@@ -135,7 +139,7 @@ func Build(ctx context.Context, cfg *Config) (*Result, error) {
 		return nil, err
 	}
 
-	if err := checkShrink(cfg, len(cols[0].items)); err != nil {
+	if err := checkShrink(cfg, old, cols); err != nil {
 		return nil, err
 	}
 
@@ -152,7 +156,6 @@ func Build(ctx context.Context, cfg *Config) (*Result, error) {
 	}
 
 	now := cfg.Now().UTC()
-	old, _ := readManifest(cfg.Out)
 	res.GeneratedAt = now.Format(time.RFC3339)
 	res.PublishedAt = res.GeneratedAt
 	if old != nil && sameShas(old.Locales, res.Locales) {
@@ -209,27 +212,33 @@ func sameShas(a, b []Locale) bool {
 
 func readManifest(out string) (*Manifest, error) {
 	b, err := os.ReadFile(filepath.Join(out, manifestRelPath))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
 	var m Manifest
 	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse %s: %w", manifestRelPath, err)
 	}
 	return &m, nil
 }
 
-func checkShrink(cfg *Config, enCount int) error {
-	old, err := readManifest(cfg.Out)
-	if err != nil || old == nil {
+func checkShrink(cfg *Config, old *Manifest, cols []collection) error {
+	if old == nil || cfg.ConfirmRemovals {
 		return nil
 	}
+	have := map[string]bool{}
+	for _, c := range cols {
+		have[c.code] = true
+	}
 	for _, l := range old.Locales {
-		if l.Code != "en" {
-			continue
+		if !have[l.Code] {
+			return fmt.Errorf("refusing to publish: locale %s is in the published manifest but not in this run (consumers purge dropped locales); re-run with -confirm-removals if this is intended", l.Code)
 		}
-		if enCount*shrinkDenominator < l.Total*shrinkNumerator && !cfg.ConfirmRemovals {
-			return fmt.Errorf("refusing to publish: en has %d exercises, the published catalog has %d (less than half); re-run with -confirm-removals if this is intended", enCount, l.Total)
+		if l.Code == "en" && len(cols[0].items)*shrinkDenominator < l.Total*shrinkNumerator {
+			return fmt.Errorf("refusing to publish: en has %d exercises, the published catalog has %d (less than half); re-run with -confirm-removals if this is intended", len(cols[0].items), l.Total)
 		}
 	}
 	return nil
@@ -349,6 +358,9 @@ func fetchLocales(ctx context.Context, cfg *Config) ([]string, error) {
 			set[l.Code] = true
 		}
 		got += len(lb.Locales)
+		if lb.Total == nil && len(lb.Locales) > 0 {
+			return nil, fmt.Errorf("GET /api/v1/meta/locales: response has locales but no total")
+		}
 		if len(lb.Locales) == 0 || lb.Total == nil || got >= *lb.Total {
 			break
 		}
@@ -405,7 +417,7 @@ func toCollection(code string, raws []json.RawMessage, total *int) (collection, 
 		if err := json.Unmarshal(r, &head); err != nil || head.ID == "" {
 			return collection{}, invalid("locale %s: exercise without a usable id", code)
 		}
-		if head.Status != "" && head.Status != "published" {
+		if head.Status != "published" {
 			return collection{}, invalid("locale %s: exercise %s has status %q", code, head.ID, head.Status)
 		}
 		var buf bytes.Buffer
@@ -418,56 +430,98 @@ func toCollection(code string, raws []json.RawMessage, total *int) (collection, 
 	return c, nil
 }
 
-func getJSON(ctx context.Context, cfg *Config, path string, dst any) error {
-	var lastErr error
-	for try := 1; try <= maxTries; try++ {
-		cctx, cancel := context.WithTimeout(ctx, requestTimeout)
-		req, err := http.NewRequestWithContext(cctx, http.MethodGet, cfg.API+path, nil)
-		if err != nil {
-			cancel()
-			return err
-		}
-		req.Header.Set("User-Agent", UserAgent)
-		req.Header.Set("Accept", "application/json")
-		cfg.Requests++
-		resp, err := cfg.Client.Do(req)
-		if err != nil {
-			cancel()
-			return fmt.Errorf("GET %s: %w", path, err)
-		}
-		body, rerr := io.ReadAll(io.LimitReader(resp.Body, maxBody))
-		resp.Body.Close()
-		cancel()
-		if resp.StatusCode == http.StatusTooManyRequests {
-			wait := retryAfter(resp.Header.Get("Retry-After"))
-			lastErr = fmt.Errorf("GET %s: 429 (Retry-After %s)", path, wait)
-			if try < maxTries {
-				fmt.Fprintf(cfg.Log, "429 on %s, waiting %s\n", path, wait)
-				cfg.Sleep(wait)
-				continue
-			}
-			return lastErr
-		}
-		if resp.StatusCode < 200 || resp.StatusCode > 299 {
-			return fmt.Errorf("GET %s: HTTP %d", path, resp.StatusCode)
-		}
-		if rerr != nil {
-			return fmt.Errorf("GET %s: read body: %w", path, rerr)
-		}
-		if err := json.Unmarshal(body, dst); err != nil {
-			return fmt.Errorf("GET %s: decode: %w", path, err)
-		}
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
 		return nil
 	}
-	return lastErr
 }
 
-func retryAfter(h string) time.Duration {
-	secs, err := strconv.Atoi(strings.TrimSpace(h))
-	if err != nil || secs < 1 {
-		secs = 1
+const transientBackoff = 2 * time.Second
+
+// getJSON retries a 429 up to maxTries times (honouring Retry-After) and a 5xx
+// or network error once after a short backoff.
+func getJSON(ctx context.Context, cfg *Config, path string, dst any) error {
+	rateLimited, transient := 0, 0
+	for {
+		status, hdr, body, err := doGet(ctx, cfg, path)
+		switch {
+		case err != nil:
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if transient++; transient > 1 {
+				return fmt.Errorf("GET %s: %w", path, err)
+			}
+			fmt.Fprintf(cfg.Log, "%v on %s, retrying\n", err, path)
+			if err := cfg.Sleep(ctx, transientBackoff); err != nil {
+				return err
+			}
+		case status == http.StatusTooManyRequests:
+			wait := retryAfter(hdr.Get("Retry-After"), cfg.Now())
+			if rateLimited++; rateLimited >= maxTries {
+				return fmt.Errorf("GET %s: 429 after %d tries (Retry-After %s)", path, maxTries, wait)
+			}
+			fmt.Fprintf(cfg.Log, "429 on %s, waiting %s\n", path, wait)
+			if err := cfg.Sleep(ctx, wait); err != nil {
+				return err
+			}
+		case status >= 500:
+			if transient++; transient > 1 {
+				return fmt.Errorf("GET %s: HTTP %d", path, status)
+			}
+			fmt.Fprintf(cfg.Log, "HTTP %d on %s, retrying\n", status, path)
+			if err := cfg.Sleep(ctx, transientBackoff); err != nil {
+				return err
+			}
+		case status < 200 || status > 299:
+			return fmt.Errorf("GET %s: HTTP %d", path, status)
+		default:
+			if err := json.Unmarshal(body, dst); err != nil {
+				return fmt.Errorf("GET %s: decode: %w", path, err)
+			}
+			return nil
+		}
 	}
-	d := time.Duration(secs) * time.Second
+}
+
+func doGet(ctx context.Context, cfg *Config, path string) (int, http.Header, []byte, error) {
+	cctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, http.MethodGet, cfg.API+path, nil)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	req.Header.Set("User-Agent", UserAgent)
+	req.Header.Set("Accept", "application/json")
+	cfg.Requests++
+	resp, err := cfg.Client.Do(req)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("read body: %w", err)
+	}
+	return resp.StatusCode, resp.Header, body, nil
+}
+
+func retryAfter(h string, now time.Time) time.Duration {
+	h = strings.TrimSpace(h)
+	d := time.Second
+	if secs, err := strconv.Atoi(h); err == nil {
+		d = time.Duration(secs) * time.Second
+	} else if t, err := http.ParseTime(h); err == nil {
+		d = t.Sub(now)
+	}
+	if d < time.Second {
+		d = time.Second
+	}
 	if d > maxRetryAfter {
 		d = maxRetryAfter
 	}

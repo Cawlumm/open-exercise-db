@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 
@@ -13,30 +14,40 @@ import (
 )
 
 func main() {
-	api := flag.String("api", snapshot.DefaultAPI, "base URL of the public API")
-	out := flag.String("out", "", "directory to write into (the checked-out catalog branch root)")
-	confirm := flag.Bool("confirm-removals", false, "publish even if en shrank to under half the published count")
-	flag.Parse()
-	if *out == "" {
-		fmt.Fprintln(os.Stderr, "build-snapshot: -out is required")
-		os.Exit(2)
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
+	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+	stop()
+	os.Exit(code)
+}
 
-	cfg := &snapshot.Config{API: *api, Out: *out, ConfirmRemovals: *confirm, Log: os.Stderr}
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("build-snapshot", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	api := fs.String("api", snapshot.DefaultAPI, "base URL of the public API")
+	out := fs.String("out", "", "directory to write into (the checked-out catalog branch root)")
+	confirm := fs.Bool("confirm-removals", false, "publish even if en shrank to under half the published count or a published locale is gone")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *out == "" {
+		fmt.Fprintln(stderr, "build-snapshot: -out is required")
+		return 2
+	}
+
+	cfg := &snapshot.Config{API: *api, Out: *out, ConfirmRemovals: *confirm, Log: stderr}
 	res, err := snapshot.Build(ctx, cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "build-snapshot: refusing to publish:", err)
-		os.Exit(1)
+		fmt.Fprintln(stderr, "build-snapshot: refusing to publish:", err)
+		return 1
 	}
 	for _, l := range res.Locales {
-		fmt.Fprintf(os.Stderr, "  %s: %d exercises, %d bytes, %s\n", l.Code, l.Total, res.Bytes[l.File], l.File)
+		fmt.Fprintf(stderr, "  %s: %d exercises, %d bytes, %s\n", l.Code, l.Total, res.Bytes[l.File], l.File)
 	}
-	fmt.Fprintf(os.Stderr, "%d requests\n", cfg.Requests)
+	fmt.Fprintf(stderr, "%d requests\n", cfg.Requests)
 	if res.Changed {
-		fmt.Println("changed", res.GeneratedAt)
+		fmt.Fprintln(stdout, "changed", res.GeneratedAt)
 	} else {
-		fmt.Println("unchanged")
+		fmt.Fprintln(stdout, "unchanged")
 	}
+	return 0
 }
