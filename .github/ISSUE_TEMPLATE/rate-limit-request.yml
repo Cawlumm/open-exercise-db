@@ -1,0 +1,40 @@
+name: Rate-limit request
+description: A documented limit blocks a legitimate use case and you want a bigger budget.
+labels: [rate-limit]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        See [docs/API_POLICY.md](https://github.com/Cawlumm/open-exercise-db/blob/main/docs/API_POLICY.md).
+        Make sure you already send a conformant `User-Agent`, debounce search and mirror the export rather than polling it.
+  - type: input
+    id: app
+    attributes:
+      label: App name and URL
+    validations:
+      required: true
+  - type: input
+    id: user-agent
+    attributes:
+      label: User-Agent you send
+      description: In the form `AppName/Version (Contact)`.
+    validations:
+      required: true
+  - type: textarea
+    id: usecase
+    attributes:
+      label: What you are building
+    validations:
+      required: true
+  - type: textarea
+    id: volume
+    attributes:
+      label: Expected volume
+      description: Requests per minute by endpoint, and how you cache or debounce.
+    validations:
+      required: true
+  - type: input
+    id: contact
+    attributes:
+      label: Contact for an app credential
+      description: Only if you want a registered app credential. Do not post secrets here.
