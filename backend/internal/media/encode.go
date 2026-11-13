@@ -2,6 +2,7 @@ package media
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/gif" // registers gif decoding with image.Decode
@@ -15,6 +16,18 @@ import (
 // maxDimension caps the longer edge of a re-encoded image, per
 // docs/PHASE1_BUILD_PLAN.md WO-4 ("cap ~800px").
 const maxDimension = 800
+
+// MaxSourcePixels and MaxSourceSide bound the declared size of an image Encode
+// will decode: 40 megapixels (about 160MB as RGBA) and 8000px on either side.
+// Phone cameras top out well under both.
+const (
+	MaxSourcePixels = 40_000_000
+	MaxSourceSide   = 8000
+)
+
+// ErrImageTooLarge is returned when an image's declared dimensions exceed
+// MaxSourcePixels or MaxSourceSide.
+var ErrImageTooLarge = errors.New("image dimensions exceed the limit")
 
 // jpegQuality balances re-hosted file size against visual quality. These are
 // small reference photos, not a page's visual centerpiece, so 85 — the
@@ -54,7 +67,25 @@ type EncodeResult struct {
 // sidecar (a small cgo/ffmpeg service outside the CGO_ENABLED=0 binary)
 // reasonable.
 func Encode(r io.Reader) (EncodeResult, error) {
-	img, _, err := image.Decode(r)
+	// The header is read before any pixels are decoded. A PNG a few hundred
+	// bytes long can declare 60000x60000 and make image.Decode allocate
+	// gigabytes, so the declared size is judged first. The caller bounds how
+	// many bytes r yields, which is what makes buffering it here safe.
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return EncodeResult{}, fmt.Errorf("read image: %w", err)
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		return EncodeResult{}, fmt.Errorf("decode image: %w", err)
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 ||
+		cfg.Width > MaxSourceSide || cfg.Height > MaxSourceSide ||
+		int64(cfg.Width)*int64(cfg.Height) > MaxSourcePixels {
+		return EncodeResult{}, fmt.Errorf("%w: %dx%d", ErrImageTooLarge, cfg.Width, cfg.Height)
+	}
+
+	img, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
 		return EncodeResult{}, fmt.Errorf("decode image: %w", err)
 	}

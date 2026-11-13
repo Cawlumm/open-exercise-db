@@ -3,13 +3,19 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"net/textproto"
+	"strings"
 	"testing"
 )
 
@@ -235,3 +241,65 @@ func multipartImage(t *testing.T, data []byte, license, attribution string) ([]b
 	}
 	return buf.Bytes(), w.FormDataContentType()
 }
+
+func TestUpload_RejectsHugeDeclaredDimensions(t *testing.T) {
+	s, _, _, api, _ := newImageGateAPI(t)
+	appToken := registerTestApp(t, s, "huge-dims-app")
+
+	// A tiny PNG whose header claims 60000x60000.
+	hdr := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\xea`\x00\x00\xea`\x08\x02\x00\x00\x00")
+	crc := crc32.ChecksumIEEE(hdr[12:])
+	hdr = binary.BigEndian.AppendUint32(hdr, crc)
+
+	body, ct := multipartImage(t, hdr, "CC0-1.0", "")
+	resp := api.Post("/api/v1/images", "User-Agent: "+testUA, "Authorization: Bearer "+appToken,
+		"Content-Type: "+ct, bytes.NewReader(body))
+	if resp.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("huge-dimension upload = %d, want 422: %s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestLimitUploadBody(t *testing.T) {
+	var read int64
+	var readErr error
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		read, readErr = io.Copy(io.Discard, r.Body)
+	})
+	h := LimitUploadBody(inner)
+	limit := int64(maxUploadBytes + uploadBodySlack)
+
+	t.Run("declared length over the cap is refused unread", func(t *testing.T) {
+		read, readErr = 0, nil
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/images", strings.NewReader("x"))
+		req.ContentLength = limit + 1
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("code = %d, want 413", rec.Code)
+		}
+	})
+
+	t.Run("undeclared length is cut off while reading", func(t *testing.T) {
+		read, readErr = 0, nil
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/images", io.LimitReader(zeroReader{}, limit+4096))
+		req.ContentLength = -1
+		h.ServeHTTP(httptest.NewRecorder(), req)
+		var mbe *http.MaxBytesError
+		if !errors.As(readErr, &mbe) || read > limit {
+			t.Fatalf("read %d bytes, err %v; want a MaxBytesError at <= %d", read, readErr, limit)
+		}
+	})
+
+	t.Run("other routes are untouched", func(t *testing.T) {
+		read, readErr = 0, nil
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/other", io.LimitReader(zeroReader{}, limit+4096))
+		h.ServeHTTP(httptest.NewRecorder(), req)
+		if readErr != nil || read != limit+4096 {
+			t.Fatalf("read %d, err %v; want the full body", read, readErr)
+		}
+	})
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) { clear(p); return len(p), nil }

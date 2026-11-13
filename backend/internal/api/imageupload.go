@@ -152,6 +152,11 @@ func registerImageUploadRoutes(hapi huma.API, s *store.Store, mediaStore media.S
 				return nil, huma.Error413RequestEntityTooLarge(fmt.Sprintf(
 					"image exceeds the %d byte limit", maxUploadBytes))
 			}
+			if errors.Is(err, media.ErrImageTooLarge) {
+				return nil, huma.Error422UnprocessableEntity(fmt.Sprintf(
+					"image dimensions are too large; the limit is %d megapixels and %dpx on a side",
+					media.MaxSourcePixels/1_000_000, media.MaxSourceSide))
+			}
 			// Decode failure is the caller's problem, not a server fault: the
 			// bytes were not a supported image whatever the part declared.
 			return nil, huma.Error422UnprocessableEntity("file is not a readable JPEG, PNG or GIF")

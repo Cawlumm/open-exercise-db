@@ -2,6 +2,9 @@ package media
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -89,5 +92,47 @@ func TestEncode_PNGInputIsAcceptedAndConvertedToJPEG(t *testing.T) {
 func TestEncode_GarbageInputIsRejected(t *testing.T) {
 	if _, err := Encode(bytes.NewReader([]byte("not an image"))); err == nil {
 		t.Fatal("Encode: expected an error for non-image input, got nil")
+	}
+}
+
+// pngHeaderOnly is a PNG signature plus a valid IHDR declaring w x h and
+// nothing else: a few dozen bytes that decode to nothing but claim any size.
+func pngHeaderOnly(w, h uint32) []byte {
+	ihdr := make([]byte, 13)
+	binary.BigEndian.PutUint32(ihdr[0:], w)
+	binary.BigEndian.PutUint32(ihdr[4:], h)
+	ihdr[8], ihdr[9] = 8, 2 // 8-bit RGB
+	var b bytes.Buffer
+	b.WriteString("\x89PNG\r\n\x1a\n")
+	_ = binary.Write(&b, binary.BigEndian, uint32(len(ihdr)))
+	chunk := append([]byte("IHDR"), ihdr...)
+	b.Write(chunk)
+	_ = binary.Write(&b, binary.BigEndian, crc32.ChecksumIEEE(chunk))
+	return b.Bytes()
+}
+
+func TestEncode_RejectsOversizedDeclaredDimensions(t *testing.T) {
+	cases := map[string][2]uint32{
+		"too many pixels": {7000, 7000},
+		"wide side":       {8001, 10},
+		"tall side":       {10, 60000},
+		"huge":            {60000, 60000},
+	}
+	for name, dim := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Encode(bytes.NewReader(pngHeaderOnly(dim[0], dim[1])))
+			if !errors.Is(err, ErrImageTooLarge) {
+				t.Fatalf("err = %v, want ErrImageTooLarge", err)
+			}
+		})
+	}
+}
+
+func TestEncode_AcceptsDimensionsAtTheLimit(t *testing.T) {
+	// Header only, so decoding fails after the size check passes: the error
+	// must be a decode error, not the size one.
+	_, err := Encode(bytes.NewReader(pngHeaderOnly(8000, 5000)))
+	if err == nil || errors.Is(err, ErrImageTooLarge) {
+		t.Fatalf("err = %v, want a decode error past the size check", err)
 	}
 }

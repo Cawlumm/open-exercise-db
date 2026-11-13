@@ -172,7 +172,7 @@ func main() {
 		// final body — including the problem+json ProblemErrors substitutes for
 		// ServeMux's plain-text errors — while CORS headers stay plainly
 		// readable on the wire whatever encoding the body ends up in.
-		Handler: api.CORS(api.Compress(api.ProblemErrors(mux))),
+		Handler: api.CORS(api.Compress(api.LimitUploadBody(api.ProblemErrors(mux)))),
 
 		// Without these, a connection that opens and then dribbles its
 		// request line one byte per minute holds a goroutine and a file
