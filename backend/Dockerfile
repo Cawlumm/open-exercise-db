@@ -12,7 +12,11 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /build/api-server ./cmd/api-server
+# The release version is injected at link time so the OpenAPI document, the
+# discovery index and /health report it (see docs/VERSIONING.md). Declared after
+# `go mod download` so a changing version never invalidates the dependency layer.
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X main.version=${VERSION}" -o /build/api-server ./cmd/api-server
 
 # Stage 2: Runtime — distroless, not alpine: per docs/DESIGN.md's Cloud Run
 # research, image size is the biggest cold-start lever, and a slim distroless

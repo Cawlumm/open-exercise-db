@@ -94,6 +94,22 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ steps.sha.outputs.full }}
+          # Full history and tags, so `git describe` below can name the release
+          # this commit is at or after.
+          fetch-depth: 0
+
+      # The version the running API reports (/health, the OpenAPI info.version).
+      # On a release tag's commit it is exactly X.Y.Z; on a later commit it is
+      # X.Y.Z-N-gSHA, so a deploy between releases is never mistaken for the
+      # release itself. Before the first tag it is just the short sha.
+      - name: Compute the version
+        id: version
+        run: |
+          set -euo pipefail
+          v="$(git describe --tags --always)"
+          v="${v#v}"
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+          echo "version $v"
 
       - name: Authenticate to Google Cloud
         id: auth
@@ -145,9 +161,11 @@ jobs:
             ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/api-server:${{ steps.sha.outputs.full }}
             ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/api-server:latest
           platforms: linux/amd64
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
           # Consumes the cache ci.yml's docker-build job populated for this same
-          # commit, so this is a near-no-op rather than a second full
-          # `go mod download` + compile.
+          # commit, so `go mod download` is a cache hit. The compile step is not:
+          # VERSION is part of its cache key and CI builds with a dummy one.
           cache-from: type=gha
           cache-to: type=gha,mode=max
           # Cloud Run pulls the image directly and never reads an attestation; a

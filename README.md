@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/Cawlumm/open-exercise-db/releases/latest"><img alt="latest release" src="https://img.shields.io/github/v/release/Cawlumm/open-exercise-db"></a>
   <img alt="code license" src="https://img.shields.io/badge/code%20license-MIT-blue">
   <img alt="data license" src="https://img.shields.io/badge/data%20license-CC0%201.0-lightgrey">
   <img alt="status" src="https://img.shields.io/badge/status-early%20but%20live-yellow">
@@ -54,6 +55,10 @@ curl -A "MyApp/1.0 (you@example.com)" \
 Every request needs a `User-Agent` naming your app and a contact. Interactive docs are at
 [`/docs`](https://oedb-api-o4dqddih5q-uk.a.run.app/docs). Rate limits, the snapshot format and
 how to ask for more are in [`docs/API_POLICY.md`](docs/API_POLICY.md).
+
+**Versions.** The API follows [semantic versioning](docs/VERSIONING.md); each
+[release](https://github.com/Cawlumm/open-exercise-db/releases) has its notes and `openapi.json`,
+and [`CHANGELOG.md`](CHANGELOG.md) lists what changed.
 
 ## Contribute
 

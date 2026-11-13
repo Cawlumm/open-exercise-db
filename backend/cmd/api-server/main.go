@@ -8,14 +8,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
-
-	"github.com/danielgtaylor/huma/v2"
-	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
 	"github.com/Cawlumm/open-exercise-db/internal/api"
 	"github.com/Cawlumm/open-exercise-db/internal/auth"
@@ -31,13 +30,23 @@ import (
 // Cloud Run sends SIGTERM before the instance is killed outright.
 const shutdownGracePeriod = 10 * time.Second
 
-// apiVersion is reported by the OpenAPI document and the discovery index. One
-// constant so the two cannot disagree — a spec claiming a different version
-// than the index is the kind of contradiction a consumer notices and cannot
-// resolve.
-const apiVersion = "1.0.0"
+// version is reported by the OpenAPI document, the discovery index and
+// /health. One variable so they cannot disagree — a spec claiming a different
+// version than the index is the kind of contradiction a consumer notices and
+// cannot resolve. Set at build time (-ldflags "-X main.version=1.2.3"); a bare
+// `go run` reports "dev".
+var version = "dev"
 
 func main() {
+	openapiOnly := flag.Bool("openapi", false, "print the OpenAPI document to stdout and exit; needs no database")
+	flag.Parse()
+	if *openapiOnly {
+		if err := writeOpenAPI(os.Stdout, version); err != nil {
+			log.Fatalf("openapi: %v", err)
+		}
+		return
+	}
+
 	cfg := config.Load()
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("invalid configuration: %v", err)
@@ -123,45 +132,11 @@ func main() {
 		if err := pool.Ping(pingCtx); err != nil {
 			log.Printf("health: database ping failed: %v", err)
 			w.WriteHeader(http.StatusServiceUnavailable)
-			json.NewEncoder(w).Encode(map[string]string{"status": "unavailable", "reason": "database"})
+			json.NewEncoder(w).Encode(map[string]string{"status": "unavailable", "reason": "database", "version": version})
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "version": version})
 	})
-
-	// Each entry URL is registered explicitly, with and without its trailing
-	// slash. "/api/v1/{$}" alone matches only "/api/v1/", so "/api/v1" — the
-	// form someone actually copies out of a URL — got ServeMux's implicit 307
-	// and an HTML redirect stub instead of the document, and "/api" was never
-	// registered at all. Verified against this Go version that all five
-	// patterns coexist without conflicting and that 405 and 404 still behave.
-	indexHandler := api.IndexHandler(apiVersion)
-	for _, pattern := range []string{
-		"GET /{$}",
-		"GET /api",
-		"GET /api/{$}",
-		"GET /api/v1",
-		"GET /api/v1/{$}",
-	} {
-		mux.Handle(pattern, indexHandler)
-	}
-
-	// OpenAPIPath carries the full /api/v1 prefix directly (rather than
-	// humago.NewWithPrefix) so the spec and docs UI land exactly where
-	// docs/PHASE1_BUILD_PLAN.md's WO-3 specifies: spec at
-	// /api/v1/openapi.json, but docs UI unprefixed at /docs. NewWithPrefix
-	// would prefix *both* since it wraps every adapter.Handle call,
-	// including the ones NewAPI itself uses to register the openapi/docs
-	// routes — which would put docs under /api/v1/docs instead.
-	humaConfig := huma.DefaultConfig("open-exercise-db API", apiVersion)
-	humaConfig.OpenAPIPath = "/api/v1/openapi"
-	humaConfig.DocsPath = "/docs"
-	humaConfig.Info.License = &huma.License{Name: "MIT", Identifier: "MIT"} // docs/DESIGN.md -> Licensing: code is MIT (data is CC0, tracked separately)
-	// Servers is informational for spec consumers/linters (redocly's
-	// no-empty-servers rule flags its absence); operation paths already
-	// carry the full /api/v1 prefix themselves, so this just documents
-	// where "/" resolves to rather than changing any routing.
-	humaConfig.Servers = []*huma.Server{{URL: "/", Description: "Same origin as the API"}}
 
 	// Sign-in is optional. A self-hoster who sets no OAuth credentials gets a
 	// working read API and a 503 on /auth/github, rather than a service that
@@ -177,8 +152,7 @@ func main() {
 		},
 	}
 
-	hapi := humago.New(mux, humaConfig)
-	api.Register(hapi, stores, exportCache, limiter, mediaStore, cfg.ImageBaseURL, authCfg)
+	registerAPI(mux, version, stores, exportCache, limiter, mediaStore, cfg.ImageBaseURL, authCfg)
 
 	server := &http.Server{
 		Addr: ":" + cfg.Port,
