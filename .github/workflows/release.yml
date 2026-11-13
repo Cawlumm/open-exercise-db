@@ -1,0 +1,102 @@
+name: Release
+
+# Cutting a release is: merge a PR that moves CHANGELOG.md's [Unreleased] entries
+# into a `## [X.Y.Z]` section, then push the tag vX.Y.Z on main. This workflow
+# then:
+#   1. checks the tag is on main and the changelog has that section,
+#   2. dumps the OpenAPI document with X.Y.Z injected (`api-server -openapi`,
+#      which needs no database and uses the same route registration as the
+#      server, so it cannot drift from what the release serves),
+#   3. creates the GitHub Release, with that changelog section as its notes and
+#      openapi.json attached, so anyone can read the spec for any version.
+#
+# It does not deploy: deploy.yml ships every merge to main on its own, deriving
+# its version from `git describe`. See docs/VERSIONING.md.
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions: {}
+
+jobs:
+  release:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release and upload its asset
+
+    steps:
+      # Full history so the main-ancestry check below can answer.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      # The tag name arrives through env, never interpolated into the script.
+      - name: Check the tag
+        id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::$TAG is not a vX.Y.Z tag"
+            exit 1
+          fi
+          version="${TAG#v}"
+
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$TAG does not point at a commit on main"
+            exit 1
+          fi
+
+          if ! grep -qF "## [$version]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$version]' section"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build openapi.json
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd backend
+          go run -ldflags "-X main.version=${VERSION}" ./cmd/api-server -openapi > ../openapi.json
+          cd ..
+          jq -e --arg v "$VERSION" '.info.version == $v and (.paths | has("/api/v1/exercises"))' openapi.json > /dev/null
+
+      - name: Extract release notes
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          awk -v header="## [$VERSION]" '
+            index($0, header) == 1 { found = 1; next }
+            found && /^## \[/      { exit }
+            found && /^\[[^]]+\]: / { exit }
+            found                  { print }
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::the CHANGELOG.md section for $VERSION is empty"
+            exit 1
+          fi
+          cat release-notes.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file release-notes.md \
+            --verify-tag \
+            openapi.json
