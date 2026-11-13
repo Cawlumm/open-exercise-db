@@ -251,8 +251,10 @@ const PlaceholderJWTSecret = "change-me-to-a-long-random-string"
 const MinJWTSecretBytes = 32
 
 // Validate returns a fatal configuration error, for the caller to refuse to
-// start on. Outside ENV=development/test a set JWT_SECRET must not be the
-// published placeholder: anyone could forge session tokens with it. An unset
+// start on. In every ENV except test a set JWT_SECRET must not be the
+// published placeholder: anyone could forge session tokens with it, and
+// ENV defaults to development, so exempting it there left the shipped compose
+// file running with a public signing key. An unset
 // secret is allowed: it disables user sign-in entirely (internal/api/auth.go),
 // so there is nothing to forge.
 func (c Config) Validate() error {
@@ -267,10 +269,10 @@ func (c Config) Validate() error {
 		return fmt.Errorf("TRUSTED_PROXY_MODE=%q is not one of %s, %s, %s",
 			c.TrustedProxyMode, ProxyDirect, ProxyCloudRun, ProxyCloudflare)
 	}
-	if c.Env == "development" || c.Env == "test" || c.JWTSecret == "" {
+	if c.JWTSecret == "" {
 		return nil
 	}
-	if c.JWTSecret == PlaceholderJWTSecret {
+	if c.JWTSecret == PlaceholderJWTSecret && c.Env != "test" {
 		return fmt.Errorf("JWT_SECRET is the placeholder from .env.example; generate a real one (e.g. openssl rand -hex 32)")
 	}
 	return nil

@@ -119,7 +119,9 @@ func TestValidate_JWTSecret(t *testing.T) {
 		{"production exact minimum", "production", long, false},
 		{"production unset disables sign-in", "production", "", false},
 		{"staging placeholder", "staging", config.PlaceholderJWTSecret, true},
-		{"development placeholder", "development", config.PlaceholderJWTSecret, false},
+		{"development placeholder", "development", config.PlaceholderJWTSecret, true},
+		{"empty env placeholder", "", config.PlaceholderJWTSecret, true},
+		{"test placeholder", "test", config.PlaceholderJWTSecret, false},
 		{"test short", "test", "abc", false},
 	}
 	for _, tc := range cases {

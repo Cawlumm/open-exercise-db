@@ -26,10 +26,13 @@ services:
     build: ./backend
     restart: unless-stopped
     environment:
-      - ENV=development
+      # Production, not development: this file is the self-host path and listens on a
+      # published port. ENV=development exempted nothing useful here and, with the
+      # old placeholder JWT_SECRET, ran a public signing key.
+      - ENV=production
       - PORT=8080
       - DATABASE_URL=postgres://${POSTGRES_USER:-openexercisedb}:${POSTGRES_PASSWORD:-openexercisedb}@postgres:5432/${POSTGRES_DB:-openexercisedb}?sslmode=disable
-      - JWT_SECRET=${JWT_SECRET}
+      - JWT_SECRET=${JWT_SECRET:-}
       - ADMIN_GITHUB_IDS=${ADMIN_GITHUB_IDS:-}
       - ADMIN_GITHUB_LOGINS=${ADMIN_GITHUB_LOGINS:-}
       # Set explicitly rather than leaning on the "./data/media" default
