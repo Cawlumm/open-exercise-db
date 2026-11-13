@@ -333,9 +333,9 @@ func authenticateApp(ctx huma.Context, s *store.Store, unknown *negativeKeyCache
 	}
 
 	// A key id that was just looked up and not found is answered without
-	// another query. Real key ids are random, so one missing a moment ago does
-	// not appear a moment later; this stops a loop of forged ids that stays
-	// under the flood guard from costing a query each.
+	// another query. This only helps a caller that repeats one id; a fresh
+	// random id each time still costs a query, and the per-address flood guard
+	// is what bounds that.
 	if unknown.seen(keyID, time.Now()) {
 		auth.VerifySecret(secret, unknownKeyHash)
 		return model.App{}, errBadCredential
