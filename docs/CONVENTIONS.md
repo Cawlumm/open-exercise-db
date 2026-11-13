@@ -285,7 +285,7 @@ story rests on.
 HTTP/1.1 404 Not Found
 Content-Type: application/problem+json
 {
-  "type": "https://openexercisedb.org/errors/not-found",  // switch on THIS
+  "type": "https://github.com/Cawlumm/open-exercise-db/blob/main/docs/ERRORS.md#not-found",  // switch on THIS
   "title": "Not Found",
   "status": 404,
   "detail": "exercise not found",                          // prose; may be reworded
