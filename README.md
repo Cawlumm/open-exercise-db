@@ -58,8 +58,9 @@ how to ask for more are in [`docs/API_POLICY.md`](docs/API_POLICY.md).
 ## Contribute
 
 - **Exercises and translations**: apps submit them on their users' behalf with an app
-  credential. Credentials are issued by hand for now:
-  [ask for one](https://github.com/Cawlumm/open-exercise-db/issues/new?template=rate-limit-request.yml).
+  credential. Every app is approved by hand while the project is small:
+  [ask for one](https://github.com/Cawlumm/open-exercise-db/issues/new?template=rate-limit-request.yml),
+  and see [how approval works](docs/API_POLICY.md#how-to-get-a-credential).
 - **Code**: fork, branch and open a pull request. [`CONTRIBUTING.md`](CONTRIBUTING.md) covers
   setup and tests.
 - **Something wrong in the data?** [Open an issue](https://github.com/Cawlumm/open-exercise-db/issues/new/choose).

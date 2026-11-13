@@ -1,5 +1,5 @@
-name: Rate-limit request
-description: A documented limit blocks a legitimate use case and you want a bigger budget.
+name: App credential or rate-limit request
+description: Ask for an app credential (bigger budget, and needed to submit data) or a higher limit. Apps are approved by hand.
 labels: [rate-limit]
 body:
   - type: markdown
@@ -33,8 +33,17 @@ body:
       description: Requests per minute by endpoint, and how you cache or debounce.
     validations:
       required: true
+  - type: dropdown
+    id: submits
+    attributes:
+      label: Will your app submit exercises, edits or translations?
+      options:
+        - "No, read only"
+        - "Yes, and it tells users their contributions are CC0 (public domain)"
+    validations:
+      required: true
   - type: input
     id: contact
     attributes:
-      label: Contact for an app credential
-      description: Only if you want a registered app credential. Do not post secrets here.
+      label: Contact address for the credential
+      description: The credential is sent privately to this address, never posted here. Issues are public, so use an address you are happy to show. Do not post secrets in this issue.
